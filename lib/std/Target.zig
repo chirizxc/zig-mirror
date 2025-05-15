@@ -106,6 +106,7 @@ pub const Os = struct {
                 .plan9 => arch.plan9Ext(),
                 else => switch (arch) {
                     .wasm32, .wasm64 => ".wasm",
+                    .spork8 => ".spork8",
                     else => "",
                 },
             };
@@ -770,6 +771,24 @@ pub const xcore = @import("Target/xcore.zig");
 pub const xtensa = @import("Target/xtensa.zig");
 pub const z80 = @import("Target/generic.zig");
 
+pub const spork8 = struct {
+    pub const Feature = enum {};
+    pub const featureSet = Cpu.Feature.FeatureSetFns(Feature).featureSet;
+    pub const featureSetHas = Cpu.Feature.FeatureSetFns(Feature).featureSetHas;
+    pub const featureSetHasAny = Cpu.Feature.FeatureSetFns(Feature).featureSetHasAny;
+    pub const featureSetHasAll = Cpu.Feature.FeatureSetFns(Feature).featureSetHasAll;
+
+    pub const cpu = struct {
+        pub const generic: Cpu.Model = .{
+            .name = "generic",
+            .llvm_name = null,
+            .features = .empty,
+        };
+    };
+
+    pub const all_features: [0]Cpu.Feature = .{};
+};
+
 pub const Abi = enum {
     none,
     gnu,
@@ -1038,6 +1057,7 @@ pub const ObjectFormat = enum {
     hex,
     /// The Mach object format used by macOS and other Apple platforms.
     macho,
+    spork8,
     /// The a.out format used by Plan 9 from Bell Labs.
     plan9,
     /// Machine code with no metadata.
@@ -1056,6 +1076,7 @@ pub const ObjectFormat = enum {
             .coff => ".obj",
             .elf, .macho, .wasm => ".o",
             .hex => ".ihex",
+            .spork8 => ".spork8",
             .plan9 => arch.plan9Ext(),
             .raw => ".bin",
             .spirv => ".spv",
@@ -1070,6 +1091,7 @@ pub const ObjectFormat = enum {
             else => switch (arch) {
                 .spirv32, .spirv64 => .spirv,
                 .wasm32, .wasm64 => .wasm,
+                .spork8 => .spork8,
                 else => .elf,
             },
         };
@@ -1118,6 +1140,7 @@ pub fn toElfMachine(target: *const Target) std.elf.EM {
         .spirv64,
         .wasm32,
         .wasm64,
+        .spork8,
         => .NONE,
     };
 }
@@ -1184,6 +1207,7 @@ pub fn toCoffMachine(target: *const Target) std.coff.IMAGE.FILE.MACHINE {
         .xcore,
         .xtensa,
         .xtensaeb,
+        .spork8,
         => .UNKNOWN,
     };
 }
@@ -1390,6 +1414,7 @@ pub const Cpu = struct {
         sheb,
         sparc,
         sparc64,
+        spork8,
         spirv32,
         spirv64,
         thumb,
@@ -1459,6 +1484,7 @@ pub const Cpu = struct {
             xcore,
             xtensa,
             z80,
+            spork8,
         };
 
         pub inline fn family(arch: Arch) Family {
@@ -1496,6 +1522,7 @@ pub const Cpu = struct {
                 .x86_16, .x86, .x86_64 => .x86,
                 .xcore => .xcore,
                 .xtensa, .xtensaeb => .xtensa,
+                .spork8 => .spork8,
             };
         }
 
@@ -1726,6 +1753,7 @@ pub const Cpu = struct {
                 .sparc,
                 .sparc64,
                 .xtensaeb,
+                .spork8,
                 => .big,
 
                 // GPU endianness is opaque. For now, assume little endian.
@@ -2882,6 +2910,7 @@ pub fn ptrBitWidth_arch_abi(cpu_arch: Cpu.Arch, abi: Abi) u16 {
         .avr,
         .msp430,
         .x86_16,
+        .spork8,
         => 16,
 
         .ez80,
@@ -3422,7 +3451,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) u16 {
 pub fn cTypeAlignment(target: *const Target, c_type: CType) u16 {
     // Overrides for unusual alignments
     switch (target.cpu.arch) {
-        .avr, .ez80 => return 1,
+        .avr, .ez80, .spork8 => return 1,
         .x86 => switch (target.os.tag) {
             .windows, .uefi => switch (c_type) {
                 .longlong, .ulonglong, .double => return 8,
@@ -3520,6 +3549,7 @@ pub fn cTypeAlignment(target: *const Target, c_type: CType) u16 {
             => 16,
 
             .avr,
+            .spork8,
             => unreachable, // Handled above.
         }),
     );
@@ -3639,6 +3669,7 @@ pub fn cMaxIntAlignment(target: *const Target) u16 {
     return switch (target.cpu.arch) {
         .avr,
         .ez80,
+        .spork8,
         => 1,
 
         .msp430, .x86_16 => 2,
@@ -3779,6 +3810,7 @@ pub fn cCallingConvention(target: *const Target) ?std.builtin.CallingConvention 
         .nvptx, .nvptx64 => .nvptx_device,
         .spirv32, .spirv64 => .spirv_device,
         .ez80 => .ez80_cet,
+        .spork8 => .naked,
     };
 }
 

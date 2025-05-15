@@ -172,6 +172,7 @@ pub fn hasLlvmSupport(target: *const std.Target, ofmt: std.Target.ObjectFormat) 
         // LLVM does not support these object formats:
         .c,
         .plan9,
+        .spork8,
         => return false,
 
         .coff,
@@ -253,6 +254,7 @@ pub fn hasLlvmSupport(target: *const std.Target, ofmt: std.Target.ObjectFormat) 
         .sheb,
         .x86_16,
         .xtensaeb,
+        .spork8,
         => false,
     };
 }
@@ -411,6 +413,7 @@ pub fn canBuildLibCompilerRt(target: *const std.Target) enum { no, yes, llvm_onl
     }
     switch (target.cpu.arch) {
         .spirv32, .spirv64 => return .no,
+        .spork8 => return .no,
         // Remove this once https://github.com/ziglang/zig/issues/23714 is fixed
         .amdgcn => return .no,
         else => {},
@@ -423,6 +426,7 @@ pub fn canBuildLibCompilerRt(target: *const std.Target) enum { no, yes, llvm_onl
 
 pub fn canBuildLibUbsanRt(target: *const std.Target) enum { no, yes, llvm_only, llvm_lld_only } {
     switch (target.cpu.arch) {
+        .spork8 => .no,
         .spirv32, .spirv64 => return .no,
         // Remove this once https://github.com/ziglang/zig/issues/23715 is fixed
         .nvptx, .nvptx64 => return .no,
@@ -904,6 +908,7 @@ pub fn zigBackend(target: *const std.Target, use_llvm: bool) std.lang.CompilerBa
         .wasm32, .wasm64 => .stage2_wasm,
         .x86 => .stage2_x86,
         .x86_64 => .stage2_x86_64,
+        .spork8 => .stage2_spork8,
         else => .other,
     };
 }

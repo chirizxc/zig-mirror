@@ -120,6 +120,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .sheb,
         .x86_16,
         .xtensaeb,
+        .spork8,
         => unreachable, // Gated by hasLlvmSupport().
     };
 
@@ -486,6 +487,7 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
         .sheb,
         .x86_16,
         .xtensaeb,
+        .spork8,
         => unreachable, // Gated by hasLlvmSupport().
     };
 }
