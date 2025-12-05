@@ -449,6 +449,9 @@ set(ZIG_STAGE2_SOURCES
     lib/std/heap.zig
     lib/std/heap/arena_allocator.zig
     lib/std/json.zig
+    lib/std/job.zig
+    lib/std/job/Client.zig
+    lib/std/job/Server.zig
     lib/std/leb128.zig
     lib/std/log.zig
     lib/std/macho.zig

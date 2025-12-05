@@ -78,6 +78,7 @@ pub const hash = @import("hash.zig");
 pub const hash_map = @import("hash_map.zig");
 pub const heap = @import("heap.zig");
 pub const http = @import("http.zig");
+pub const job = @import("job.zig");
 pub const json = @import("json.zig");
 pub const leb = @import("leb128.zig");
 pub const log = @import("log.zig");
