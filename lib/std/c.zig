@@ -10810,6 +10810,16 @@ pub const ptrace = switch (native_os) {
     else => {},
 };
 
+pub extern "c" fn semget(key: std.posix.key_t, nsems: c_int, semflg: c_int) c_int;
+pub extern "c" fn semctl(semid: c_int, semnum: c_int, op: c_int, ...) c_int;
+pub extern "c" fn semop(semid: c_int, sops: [*]std.posix.sembuf, nsops: usize) c_int;
+pub extern "c" fn semtimedop(
+    semid: c_int,
+    sops: [*]std.posix.sembuf,
+    nsops: usize,
+    timeout: ?*const timespec,
+) c_int;
+
 pub extern "c" fn sem_init(sem: *sem_t, pshared: c_int, value: c_uint) c_int;
 pub extern "c" fn sem_destroy(sem: *sem_t) c_int;
 pub extern "c" fn sem_open(name: [*:0]const u8, flag: c_int, mode: mode_t, value: c_uint) *sem_t;

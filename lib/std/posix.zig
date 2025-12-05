@@ -275,6 +275,99 @@ pub const LOG = struct {
     pub const DEBUG = 7;
 };
 
+pub const key_t = switch (native_os) {
+    .linux, .illumos => enum(c_int) {
+        IPC_PRIVATE = 0,
+        _,
+    },
+    .freebsd, .netbsd, .openbsd, .dragonfly => enum(c_long) {
+        IPC_PRIVATE = 0,
+        _,
+    },
+    .haiku,
+    .driverkit,
+    .ios,
+    .maccatalyst,
+    .macos,
+    .tvos,
+    .visionos,
+    .watchos,
+    => enum(i32) {
+        IPC_PRIVATE = 0,
+        _,
+    },
+    else => unreachable,
+};
+pub const SETVAL = switch (native_os) {
+    .linux => 16,
+
+    .illumos,
+    .haiku,
+
+    .freebsd,
+    .netbsd,
+    .openbsd,
+    .dragonfly,
+
+    .driverkit,
+    .ios,
+    .maccatalyst,
+    .macos,
+    .tvos,
+    .visionos,
+    .watchos,
+    => 8,
+
+    else => unreachable,
+};
+pub const SEM_UNDO = switch (native_os) {
+    .linux,
+    .illumos,
+
+    .freebsd,
+    .netbsd,
+    .openbsd,
+    .dragonfly,
+
+    .driverkit,
+    .ios,
+    .maccatalyst,
+    .macos,
+    .tvos,
+    .visionos,
+    .watchos,
+    => 0x1000,
+
+    .haiku => 10,
+
+    else => unreachable,
+};
+pub const sembuf = switch (native_os) {
+    .linux,
+    .illumos,
+    .haiku,
+
+    .freebsd,
+    .netbsd,
+    .openbsd,
+    .dragonfly,
+
+    .driverkit,
+    .ios,
+    .maccatalyst,
+    .macos,
+    .tvos,
+    .visionos,
+    .watchos,
+    => extern struct {
+        sem_num: c_ushort,
+        sem_op: c_short,
+        sem_flg: c_short,
+    },
+
+    else => unreachable,
+};
+
 pub const socket_t = if (native_os == .windows) windows.ws2_32.SOCKET else fd_t;
 
 /// Obtains errno from the return value of a system function call.
