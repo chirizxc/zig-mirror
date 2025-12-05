@@ -15,6 +15,7 @@ ids: if (builtin.single_threaded) struct {
         return 0;
     }
 } else std.AutoArrayHashMapUnmanaged(std.Thread.Id, void),
+job_client: ?*std.job.Client,
 
 const Runnable = struct {
     runFn: RunProto,
@@ -28,6 +29,7 @@ pub const Options = struct {
     n_jobs: ?usize = null,
     track_ids: bool = false,
     stack_size: usize = std.Thread.SpawnConfig.default_stack_size,
+    job_client: ?*std.job.Client = null,
 };
 
 pub fn init(pool: *Pool, options: Options) !void {
@@ -37,6 +39,7 @@ pub fn init(pool: *Pool, options: Options) !void {
         .allocator = allocator,
         .threads = if (builtin.single_threaded) .{} else &.{},
         .ids = .{},
+        .job_client = options.job_client,
     };
 
     if (builtin.single_threaded) {
@@ -284,6 +287,13 @@ fn worker(pool: *Pool) void {
     if (id) |_| pool.ids.putAssumeCapacityNoClobber(std.Thread.getCurrentId(), {});
 
     while (true) {
+        const job_token: ?std.job.Client.Token = if (pool.job_client) |job_client| token: {
+            pool.mutex.unlock();
+            defer pool.mutex.lock();
+            break :token job_client.acquire() catch |err| {
+                std.debug.panic("failed to acquire job token: {t}", .{err});
+            };
+        } else null;
         while (pool.run_queue.popFirst()) |run_node| {
             // Temporarily unlock the mutex in order to execute the run_node
             pool.mutex.unlock();
@@ -292,6 +302,7 @@ fn worker(pool: *Pool) void {
             const runnable: *Runnable = @fieldParentPtr("node", run_node);
             runnable.runFn(runnable, id);
         }
+        if (job_token) |t| t.release();
 
         // Stop executing instead of waiting if the thread pool is no longer running.
         if (pool.is_running) {
