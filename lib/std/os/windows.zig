@@ -2609,7 +2609,7 @@ pub fn DeviceIoControl(
 ) DeviceIoControlError!void {
     var io_status_block: IO_STATUS_BLOCK = undefined;
     const rc = switch (io_control_code.DeviceType) {
-        .FILE_SYSTEM, .NAMED_PIPE => ntdll.NtFsControlFile(
+        else => ntdll.NtDeviceIoControlFile(
             device,
             opts.event,
             opts.apc_routine,
@@ -2621,7 +2621,7 @@ pub fn DeviceIoControl(
             if (opts.out.len > 0) opts.out.ptr else null,
             @intCast(opts.out.len),
         ),
-        else => ntdll.NtDeviceIoControlFile(
+        .FILE_SYSTEM => ntdll.NtFsControlFile(
             device,
             opts.event,
             opts.apc_routine,
