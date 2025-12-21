@@ -743,7 +743,7 @@ pub const Reloc = extern struct {
         }
     };
 
-    pub fn apply(reloc: *const Reloc, elf: *Elf) void {
+    pub fn apply(reloc: *Reloc, elf: *Elf) void {
         assert(elf.ehdrField(.type) != .REL);
         const loc_ni = reloc.loc.get(elf).ni;
         switch (loc_ni) {
@@ -766,7 +766,7 @@ pub const Reloc = extern struct {
                     elf.targetLoad(&target_sym.value) +% @as(u64, @bitCast(reloc.addend));
                 switch (elf.ehdrField(.machine)) {
                     else => |machine| @panic(@tagName(machine)),
-                    .X86_64 => switch (reloc.type.X86_64) {
+                    .X86_64 => type: switch (reloc.type.X86_64) {
                         else => |kind| @panic(@tagName(kind)),
                         .@"64" => std.mem.writeInt(
                             u64,
@@ -852,6 +852,75 @@ pub const Reloc = extern struct {
                             elf.targetLoad(&target_sym.size) +% @as(u64, @bitCast(reloc.addend)),
                             target_endian,
                         ),
+                        .GOTPCRELX => {
+                            relax: switch (Symbol.Index.Shndx.fromSection(
+                                elf.targetLoad(&target_sym.shndx),
+                            )) {
+                                .UNDEF => {},
+                                else => {
+                                    const inst = (loc_slice.ptr - 2)[0..2];
+                                    if (inst[0] != 0xff) break :relax;
+                                    const mod_rm: packed struct {
+                                        rm: u3,
+                                        opcode: u3,
+                                        mod: u2,
+                                    } = @bitCast(inst[1]);
+                                    if (mod_rm.mod != 0b00) break :relax;
+                                    if (mod_rm.rm != 0b101) break :relax;
+                                    switch (mod_rm.opcode) {
+                                        0, // incl 0x0(%rip)
+                                        1, // decl 0x0(%rip)
+                                        3, // lcall *0x0(%rip)
+                                        5, // ljmp *0x0(%rip)
+                                        6, // push 0x0(%rip)
+                                        7, // ud 0x0(%rip)
+                                        => break :relax,
+                                        2 => { // call *0x0(%rip)
+                                            inst[1] = 0xe8; // call 0
+                                        },
+                                        4 => { // jmp *0x0(%rip)
+                                            inst[1] = 0xe9; // jmp 0
+                                        },
+                                    }
+                                    inst[0] = 0x48; // rex.W
+                                    reloc.type.X86_64 = .PC32;
+                                    continue :type .PC32;
+                                },
+                            }
+                            @panic("relax failure");
+                        },
+                        .REX_GOTPCRELX => {
+                            relax: switch (Symbol.Index.Shndx.fromSection(
+                                elf.targetLoad(&target_sym.shndx),
+                            )) {
+                                .UNDEF => {},
+                                else => {
+                                    const inst = (loc_slice.ptr - 3)[0..3];
+                                    const rex: packed struct {
+                                        b: bool,
+                                        x: bool,
+                                        r: bool,
+                                        w: bool,
+                                        encoded4: u4,
+                                    } = @bitCast(inst[0]);
+                                    if (rex.encoded4 != 0b0100) break :relax;
+                                    if (!rex.w) break :relax;
+                                    if (rex.x) break :relax;
+                                    if (inst[1] != 0x8b) break :relax; // mov
+                                    const mod_rm: packed struct {
+                                        rm: u3,
+                                        r: u3,
+                                        mod: u2,
+                                    } = @bitCast(inst[2]);
+                                    if (mod_rm.mod != 0b00) break :relax;
+                                    if (mod_rm.rm != 0b101) break :relax;
+                                    inst[1] = 0x8d; // lea
+                                    reloc.type.X86_64 = .PC32;
+                                    continue :type .PC32;
+                                },
+                            }
+                            @panic("relax failure");
+                        },
                     },
                 }
             },
@@ -1176,7 +1245,7 @@ fn initHeaders(
     }
 
     assert(elf.ni.shdr == try elf.mf.addLastChildNode(gpa, elf.ni.file, .{
-        .size = elf.ehdrField(.shentsize) * elf.ehdrField(.shnum),
+        .size = @as(u64, elf.ehdrField(.shentsize)) * elf.ehdrField(.shnum),
         .alignment = elf.mf.flags.block_size,
         .moved = true,
         .resized = true,
@@ -1193,7 +1262,7 @@ fn initHeaders(
         elf.phdrs.items[rodata_phndx] = elf.ni.rodata;
 
         assert(elf.ni.phdr == try elf.mf.addOnlyChildNode(gpa, elf.ni.rodata, .{
-            .size = elf.ehdrField(.phentsize) * elf.ehdrField(.phnum),
+            .size = @as(u64, elf.ehdrField(.phentsize)) * elf.ehdrField(.phnum),
             .alignment = addr_align,
             .moved = true,
             .resized = true,
@@ -2108,7 +2177,7 @@ fn loadObject(
             if (ehdr.machine != elf.ehdrField(.machine))
                 return diags.failParse(path, "bad machine", .{});
             if (ehdr.shoff == 0 or ehdr.shnum <= 1) return;
-            if (ehdr.shoff + ehdr.shentsize * ehdr.shnum > fl.size)
+            if (ehdr.shoff + @as(ElfN.Off, ehdr.shentsize) * ehdr.shnum > fl.size)
                 return diags.failParse(path, "bad section header location", .{});
             if (ehdr.shentsize < @sizeOf(ElfN.Shdr))
                 return diags.failParse(path, "unsupported shentsize", .{});
@@ -2213,11 +2282,11 @@ fn loadObject(
                         si.* = .null;
                         const input_sym = try r.peekStruct(ElfN.Sym, target_endian);
                         try r.discardAll64(symtab.shdr.entsize);
-                        if (input_sym.name >= strtab.len or input_sym.shndx == std.elf.SHN_UNDEF or
-                            input_sym.shndx >= ehdr.shnum) continue;
+                        if (input_sym.name >= strtab.len or input_sym.shndx >= ehdr.shnum) continue;
                         switch (input_sym.info.type) {
                             .NOTYPE, .OBJECT, .FUNC => {},
                             .SECTION => {
+                                if (input_sym.shndx == std.elf.SHN_UNDEF) continue;
                                 const section = &sections[input_sym.shndx];
                                 if (input_sym.value == section.shdr.addr) si.* = section.si;
                                 continue;
@@ -2239,21 +2308,30 @@ fn loadObject(
                         switch (input_sym.info.bind) {
                             else => {},
                             .GLOBAL => {
-                                const gop = elf.globals.getOrPutAssumeCapacity(elf.targetLoad(
-                                    &@field(elf.symPtr(si.*), @tagName(class)).name,
-                                ));
-                                if (gop.found_existing) switch (elf.targetLoad(
-                                    switch (elf.symPtr(gop.value_ptr.*)) {
-                                        inline else => |sym| &sym.info,
+                                const sym = @field(elf.symPtr(si.*), @tagName(class));
+                                const gop =
+                                    elf.globals.getOrPutAssumeCapacity(elf.targetLoad(&sym.name));
+                                if (gop.found_existing) switch (input_sym.shndx) {
+                                    std.elf.SHN_UNDEF => {},
+                                    else => {
+                                        const existing_sym =
+                                            @field(elf.symPtr(gop.value_ptr.*), @tagName(class));
+                                        switch (elf.targetLoad(&existing_sym.info).bind) {
+                                            else => unreachable,
+                                            .GLOBAL => switch (elf.targetLoad(&existing_sym.shndx)) {
+                                                std.elf.SHN_UNDEF => {},
+                                                else => return diags.failParse(
+                                                    path,
+                                                    "multiple definitions of '{s}'",
+                                                    .{name},
+                                                ),
+                                            },
+                                            .WEAK => {},
+                                        }
+                                        existing_sym.size = sym.size;
+                                        existing_sym.shndx = sym.shndx;
+                                        gop.value_ptr.flushMoved(elf, input_sym.value);
                                     },
-                                ).bind) {
-                                    else => unreachable,
-                                    .GLOBAL => return diags.failParse(
-                                        path,
-                                        "multiple definitions of '{s}'",
-                                        .{name},
-                                    ),
-                                    .WEAK => {},
                                 };
                                 gop.value_ptr.* = si.*;
                             },
@@ -2322,7 +2400,7 @@ fn loadDso(elf: *Elf, path: std.Build.Cache.Path, fr: *Io.File.Reader) !void {
     const r = &fr.interface;
 
     log.debug("loadDso({f})", .{path.fmtEscapeString()});
-    const ident = try r.peek(std.elf.EI.NIDENT);
+    const ident = try r.peek(std.elf.EI.OSABI);
     if (!std.mem.eql(u8, ident[0..std.elf.MAGIC.len], std.elf.MAGIC)) return error.BadMagic;
     if (!std.mem.eql(u8, ident[std.elf.MAGIC.len..], elf.mf.memory_map.memory[std.elf.MAGIC.len..ident.len]))
         return diags.failParse(path, "bad ident", .{});
@@ -2606,7 +2684,7 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
                 },
             };
             assert(shndx < @intFromEnum(Symbol.Index.Shndx.LORESERVE));
-            break :shndx .{ @enumFromInt(shndx), elf.targetLoad(&ehdr.shentsize) * shnum };
+            break :shndx .{ @enumFromInt(shndx), @as(u64, elf.targetLoad(&ehdr.shentsize)) * shnum };
         },
     };
     _, const shdr_node_size = elf.ni.shdr.location(&elf.mf).resolve(&elf.mf);
@@ -3706,6 +3784,14 @@ fn updateExportsInner(
             },
         }
         export_si.flushMoved(elf, value);
+        if (elf.dynsym.getIndex(export_si)) |export_dsi| switch (elf.dynsymSlice()) {
+            inline else => |dynsyms| {
+                const dynsym = &dynsyms[export_dsi];
+                elf.targetStore(&dynsym.value, @intCast(value));
+                dynsym.size = @intCast(size);
+                dynsym.shndx = shndx;
+            },
+        };
     }
 }
 
