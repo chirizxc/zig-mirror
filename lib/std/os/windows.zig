@@ -22,6 +22,7 @@ test {
 }
 
 pub const advapi32 = @import("windows/advapi32.zig");
+pub const bcryptprimitives = @import("windows/bcryptprimitives.zig");
 pub const kernel32 = @import("windows/kernel32.zig");
 pub const ntdll = @import("windows/ntdll.zig");
 pub const ws2_32 = @import("windows/ws2_32.zig");
@@ -2641,33 +2642,6 @@ pub fn SetHandleInformation(h: HANDLE, mask: DWORD, flags: DWORD) SetHandleInfor
         switch (GetLastError()) {
             else => |err| return unexpectedError(err),
         }
-    }
-}
-
-pub const RtlGenRandomError = error{
-    /// `RtlGenRandom` has been known to fail in situations where the system is under heavy load.
-    /// Unfortunately, it does not call `SetLastError`, so it is not possible to get more specific
-    /// error information; it could actually be due to an out-of-memory condition, for example.
-    SystemResources,
-};
-
-/// Call RtlGenRandom() instead of CryptGetRandom() on Windows
-/// https://github.com/rust-lang-nursery/rand/issues/111
-/// https://bugzilla.mozilla.org/show_bug.cgi?id=504270
-pub fn RtlGenRandom(output: []u8) RtlGenRandomError!void {
-    var total_read: usize = 0;
-    var buff: []u8 = output[0..];
-    const max_read_size: ULONG = maxInt(ULONG);
-
-    while (total_read < output.len) {
-        const to_read: ULONG = @min(buff.len, max_read_size);
-
-        if (advapi32.RtlGenRandom(buff.ptr, to_read) == 0) {
-            return error.SystemResources;
-        }
-
-        total_read += to_read;
-        buff = buff[to_read..];
     }
 }
 
