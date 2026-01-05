@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
         test_obj.root_module.linkSystemLibrary("ntdll", .{});
         test_obj.root_module.linkSystemLibrary("kernel32", .{});
         test_obj.root_module.linkSystemLibrary("ws2_32", .{});
+        test_obj.root_module.linkSystemLibrary("advapi32", .{}); // for RtlGenRandom
     }
 
     const test_exe_mod = b.createModule(.{

@@ -32,6 +32,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.subsystem = .console;
+    exe.root_module.linkSystemLibrary("advapi32", .{}); // for RtlGenRandom
     exe.root_module.linkSystemLibrary("kernel32", .{});
     exe.root_module.linkSystemLibrary("ntdll", .{});
     exe.root_module.addObject(obj);

@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) !void {
                 .optimize = optimize,
             }),
         });
+        lib_msvc.root_module.linkSystemLibrary("advapi32", .{}); // for RtlGenRandom
         const verify_msvc = b.addExecutable(.{
             .name = "verify-msvc",
             .root_module = b.createModule(.{
