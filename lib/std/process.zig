@@ -502,7 +502,6 @@ pub const RunOptions = struct {
     create_no_window: bool = true,
     /// Darwin-only. Disable ASLR for the child process.
     disable_aslr: bool = false,
-    timeout: Io.Timeout = .none,
 };
 
 pub const RunResult = struct {
@@ -544,7 +543,6 @@ pub fn run(gpa: Allocator, io: Io, options: RunOptions) RunError!RunResult {
         .stderr = &stderr,
         .stdout_limit = options.stdout_limit,
         .stderr_limit = options.stderr_limit,
-        .timeout = options.timeout,
     });
 
     return .{
