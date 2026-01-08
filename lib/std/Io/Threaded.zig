@@ -1179,7 +1179,7 @@ const Syscall = struct {
 
 const max_iovecs_len = 8;
 const splat_buffer_size = 64;
-const poll_buffer_len = 100;
+const poll_buffer_len = 32;
 const default_PATH = "/usr/local/bin:/bin/:/usr/bin";
 
 comptime {
