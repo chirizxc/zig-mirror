@@ -467,7 +467,6 @@ pub fn spawnPath(io: Io, dir: Io.Dir, options: SpawnOptions) SpawnError!Child {
 
 pub const RunError = posix.GetCwdError || posix.ReadError || SpawnError || posix.PollError || error{
     StreamTooLong,
-    ConcurrencyUnavailable,
 };
 
 pub const RunOptions = struct {
