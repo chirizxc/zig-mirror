@@ -69,6 +69,19 @@ random_file: RandomFile = .{},
 
 csprng: Csprng = .{},
 
+/// Tracks open file handles for debugging purposes.
+open_file_map: OpenFileMap = if (OpenFileMap != void) .{} else {},
+
+pub const OpenFileMap = switch (builtin.mode) {
+    .Debug => struct {
+        map: std.AutoArrayHashMapUnmanaged(File.Handle, StackTrace) = .empty,
+        oom: bool = false,
+    },
+    else => void,
+};
+
+pub const StackTrace = [6]usize;
+
 pub const Csprng = struct {
     rng: std.Random.DefaultCsprng = .{
         .state = undefined,
@@ -1315,6 +1328,7 @@ pub fn setAsyncLimit(t: *Threaded, new_limit: Io.Limit) void {
 }
 
 pub fn deinit(t: *Threaded) void {
+    const gpa = t.allocator;
     t.join();
     if (is_windows and t.wsa.status == .initialized) {
         if (ws2_32.WSACleanup() != 0) recoverableOsBugDetected();
@@ -1325,6 +1339,22 @@ pub fn deinit(t: *Threaded) void {
     }
     t.null_file.deinit();
     t.random_file.deinit();
+    if (OpenFileMap != void) {
+        for (t.open_file_map.map.keys(), t.open_file_map.map.values()) |handle, *value| {
+            const st: std.builtin.StackTrace = .{
+                .instruction_addresses = value,
+                .index = value.len,
+            };
+            std.log.err("file handle {any} leaked: {f}", .{
+                handle,
+                std.debug.FormatStackTrace{
+                    .stack_trace = st,
+                    .terminal_mode = std.log.terminalMode(),
+                },
+            });
+        }
+        t.open_file_map.map.deinit(gpa);
+    }
     t.* = undefined;
 }
 
@@ -3863,7 +3893,33 @@ fn dirOpenFilePosix(
         }
     }
 
+    trackOpenFile(t, fd, @returnAddress());
     return .{ .handle = fd };
+}
+
+fn trackOpenFile(t: *Threaded, handle: File.Handle, ra: usize) void {
+    if (OpenFileMap == void) return;
+    t.mutex.lock();
+    defer t.mutex.unlock();
+    if (t.open_file_map.oom) return;
+    const gop = t.open_file_map.map.getOrPut(t.allocator, handle) catch |err| switch (err) {
+        error.OutOfMemory => {
+            t.open_file_map.oom = true;
+            t.open_file_map.map.clearAndFree(t.allocator);
+            return;
+        },
+    };
+    assert(!gop.found_existing);
+    const st = std.debug.captureCurrentStackTrace(.{ .first_address = ra }, gop.value_ptr);
+    @memset(gop.value_ptr[@min(st.index, gop.value_ptr.len)..], 0);
+}
+
+fn trackCloseFile(t: *Threaded, handle: File.Handle) void {
+    if (OpenFileMap == void) return;
+    t.mutex.lock();
+    defer t.mutex.unlock();
+    if (t.open_file_map.oom) return;
+    assert(t.open_file_map.map.swapRemove(handle));
 }
 
 fn dirOpenFileWindows(
@@ -3873,14 +3929,14 @@ fn dirOpenFileWindows(
     flags: File.OpenFlags,
 ) File.OpenError!File {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    _ = t;
     const sub_path_w_array = try windows.sliceToPrefixedFileW(dir.handle, sub_path);
     const sub_path_w = sub_path_w_array.span();
     const dir_handle = if (Dir.path.isAbsoluteWindowsWtf16(sub_path_w)) null else dir.handle;
-    return dirOpenFileWtf16(dir_handle, sub_path_w, flags);
+    return dirOpenFileWtf16(t, dir_handle, sub_path_w, flags);
 }
 
 pub fn dirOpenFileWtf16(
+    t: *Threaded,
     dir_handle: ?windows.HANDLE,
     sub_path_w: [:0]const u16,
     flags: File.OpenFlags,
@@ -4022,6 +4078,7 @@ pub fn dirOpenFileWtf16(
         .ACCESS_VIOLATION => |err| return syscall.ntstatusBug(err), // bad io_status_block pointer
         else => |status| return syscall.unexpectedNtstatus(status),
     };
+    trackOpenFile(t, handle, @returnAddress());
     return .{ .handle = handle };
 }
 
@@ -4114,6 +4171,7 @@ fn dirOpenFileWasi(
         if (is_dir) return error.IsDir;
     }
 
+    trackOpenFile(t, fd, @returnAddress());
     return .{ .handle = fd };
 }
 
@@ -7856,8 +7914,10 @@ fn dirHardLink(
 
 fn fileClose(userdata: ?*anyopaque, files: []const File) void {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    _ = t;
-    for (files) |file| posix.close(file.handle);
+    for (files) |file| {
+        trackCloseFile(t, file.handle);
+        posix.close(file.handle);
+    }
 }
 
 const fileReadStreaming = switch (native_os) {
