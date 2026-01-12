@@ -669,6 +669,11 @@ const use_debug_allocator = !is_wasm and switch (builtin.mode) {
     .ReleaseFast, .ReleaseSmall => !builtin.link_libc and builtin.single_threaded, // Also not ideal.
 };
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+const use_debug_io = switch (builtin.mode) {
+    .Debug, .ReleaseSafe => true,
+    .ReleaseFast, .ReleaseSmall => false,
+};
+var debug_io: std.Io.Debug = undefined;
 
 inline fn callMain(args: std.process.Args.Vector, environ: std.process.Environ.Block) u8 {
     const fn_info = @typeInfo(@TypeOf(root.main)).@"fn";
@@ -704,6 +709,15 @@ inline fn callMain(args: std.process.Args.Vector, environ: std.process.Environ.B
     });
     defer threaded.deinit();
 
+    if (use_debug_io) {
+        debug_io = .init(threaded.io(), gpa);
+    }
+    defer if (use_debug_io) {
+        debug_io.deinit();
+    };
+
+    const io = if (use_debug_io) debug_io.io() else threaded.io();
+
     var environ_map = std.process.Environ.createMap(.{ .block = environ }, gpa) catch |err|
         std.process.fatal("failed to parse environment variables: {t}", .{err});
     defer environ_map.deinit();
@@ -718,7 +732,7 @@ inline fn callMain(args: std.process.Args.Vector, environ: std.process.Environ.B
         },
         .arena = &arena_allocator,
         .gpa = gpa,
-        .io = threaded.io(),
+        .io = io,
         .environ_map = &environ_map,
         .preopens = preopens,
     }));

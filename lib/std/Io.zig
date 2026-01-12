@@ -474,6 +474,7 @@ pub fn PollFiles(comptime StreamEnum: type) type {
 userdata: ?*anyopaque,
 vtable: *const VTable,
 
+pub const Debug = @import("Io/Debug.zig");
 pub const Threaded = @import("Io/Threaded.zig");
 pub const Evented = switch (builtin.os.tag) {
     .linux => switch (builtin.cpu.arch) {
