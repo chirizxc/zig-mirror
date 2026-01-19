@@ -4641,20 +4641,6 @@ fn toLlvmGlobalAddressSpace(wanted_address_space: std.builtin.AddressSpace, targ
 /// or if it produces miscompilations.
 pub fn backendSupportsF16(target: *const std.Target) bool {
     return switch (target.cpu.arch) {
-        // https://github.com/llvm/llvm-project/issues/97981
-        .csky,
-        // https://github.com/llvm/llvm-project/issues/97981
-        .powerpc,
-        .powerpcle,
-        .powerpc64,
-        .powerpc64le,
-        // https://github.com/llvm/llvm-project/issues/97981
-        .wasm32,
-        .wasm64,
-        // https://github.com/llvm/llvm-project/issues/97981
-        .sparc,
-        .sparc64,
-        => false,
         .arm,
         .armeb,
         .thumb,
@@ -4681,11 +4667,6 @@ pub fn backendSupportsF128(target: *const std.Target) bool {
     return switch (target.cpu.arch) {
         // https://github.com/llvm/llvm-project/issues/121122
         .amdgcn,
-        // Test failures all over the place.
-        .mips64,
-        .mips64el,
-        // https://github.com/llvm/llvm-project/issues/41838
-        .sparc,
         => false,
         .arm,
         .armeb,
