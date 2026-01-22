@@ -8301,6 +8301,7 @@ fn fileReadStreamingWindows(file: File, data: []const []u8) File.Reader.Error!us
 
     var io_status_block: windows.IO_STATUS_BLOCK = undefined;
     var done: bool = false;
+    const infinite: windows.LARGE_INTEGER = windows.INFINITE;
 
     read: {
         const syscall: Syscall = try .start();
@@ -8329,7 +8330,7 @@ fn fileReadStreamingWindows(file: File, data: []const []u8) File.Reader.Error!us
         }
         try syscall.toApc(.{ .handle = file.handle, .iosb = &io_status_block });
         while (true) {
-            switch (windows.ntdll.NtDelayExecution(1, null)) {
+            switch (windows.ntdll.NtDelayExecution(1, &infinite)) {
                 .USER_APC => {
                     if (!done) {
                         // Other APC work was queued before calling into this function.
@@ -8338,7 +8339,7 @@ fn fileReadStreamingWindows(file: File, data: []const []u8) File.Reader.Error!us
                     }
                     break syscall.finishApc();
                 },
-                .SUCCESS, .CANCELLED => {
+                .SUCCESS, .CANCELLED, .TIMEOUT, .ALERTED => {
                     try syscall.checkCancelApc();
                     continue;
                 },
