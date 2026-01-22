@@ -8255,7 +8255,8 @@ fn fileReadStreamingWindows(file: File, data: []const []u8) File.Reader.Error!us
                     continue;
                 },
                 .INVALID_PARAMETER => |err| return syscall.ntstatusBug(err), // streaming read of async mode file
-                else => |status| return syscall.unexpectedNtstatus(status),
+                else => |status| std.debug.panic("fileReadStreamingWindows NtReadFile returned {t}", .{status}),
+                //else => |status| return syscall.unexpectedNtstatus(status),
             }
         }
         try syscall.toApc();
@@ -8266,7 +8267,8 @@ fn fileReadStreamingWindows(file: File, data: []const []u8) File.Reader.Error!us
                     try syscall.checkCancel();
                     continue;
                 },
-                else => |status| return syscall.unexpectedNtstatus(status),
+                else => |status| std.debug.panic("fileReadStreamingWindows NtDelayExecution returned {t}", .{status}),
+                //else => |status| return syscall.unexpectedNtstatus(status),
             }
         }
     }
@@ -8274,7 +8276,8 @@ fn fileReadStreamingWindows(file: File, data: []const []u8) File.Reader.Error!us
     switch (io_status_block.u.Status) {
         .SUCCESS, .END_OF_FILE, .PIPE_BROKEN => {},
         .ACCESS_DENIED => return error.AccessDenied,
-        else => |status| return windows.unexpectedStatus(status),
+        else => |status| std.debug.panic("fileReadStreamingWindows IO_STATUS_BLOCK returned {t}", .{status}),
+        //else => |status| return windows.unexpectedStatus(status),
     }
     return io_status_block.Information;
 }
