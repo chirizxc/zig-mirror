@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     }
 
     if (listen) {
-        return mainServer(init) catch @panic("internal test runner failure");
+        return mainServer(init) catch |err| std.debug.panic("internal test runner failure: {t}", .{err});
     } else {
         return mainTerminal(init);
     }
@@ -75,24 +75,24 @@ fn mainServer(init: std.process.Init.Minimal) !void {
     @disableInstrumentation();
     var stdin_reader = Io.File.stdin().readerStreaming(runner_threaded_io, &stdin_buffer);
     var stdout_writer = Io.File.stdout().writerStreaming(runner_threaded_io, &stdout_buffer);
-    var server = try std.zig.Server.init(.{
+    var server = std.zig.Server.init(.{
         .in = &stdin_reader.interface,
         .out = &stdout_writer.interface,
         .zig_version = builtin.zig_version_string,
-    });
+    }) catch |err| std.debug.panic("failed to init Server: {t}", .{err});
 
     if (builtin.fuzz) {
         const coverage = fuzz_abi.fuzzer_coverage();
-        try server.serveCoverageIdMessage(
+        server.serveCoverageIdMessage(
             coverage.id,
             coverage.runs,
             coverage.unique,
             coverage.seen,
-        );
+        ) catch |err| std.debug.panic("failed to serveCoverageIdMessage: {t}", .{err});
     }
 
     while (true) {
-        const hdr = try server.receiveMessage();
+        const hdr = server.receiveMessage() catch |err| std.debug.panic("failed to receiveMessage: {t}", .{err});
         switch (hdr.tag) {
             .exit => {
                 return std.process.exit(0);
@@ -121,11 +121,11 @@ fn mainServer(init: std.process.Init.Minimal) !void {
                     expected_panic_msg.* = 0;
                 }
 
-                try server.serveTestMetadata(.{
+                server.serveTestMetadata(.{
                     .names = names,
                     .expected_panic_msgs = expected_panic_msgs,
                     .string_bytes = string_bytes.items,
-                });
+                }) catch |err| std.debug.panic("failed to serveTestMetadata: {t}", .{err});
             },
 
             .run_test => {
@@ -136,12 +136,12 @@ fn mainServer(init: std.process.Init.Minimal) !void {
                     .environ = init.environ,
                 });
                 log_err_count = 0;
-                const index = try server.receiveBody_u32();
+                const index = server.receiveBody_u32() catch |err| std.debug.panic("failed to receiveBody_u32 test index: {t}", .{err});
                 const test_fn = builtin.test_functions[index];
                 is_fuzz_test = false;
 
                 // let the build server know we're starting the test now
-                try server.serveStringMessage(.test_started, &.{});
+                server.serveStringMessage(.test_started, &.{}) catch |err| std.debug.panic("failed to serveStringMessage: {t}", .{err});
 
                 const TestResults = std.zig.Server.Message.TestResults;
                 const status: TestResults.Status = if (test_fn.func()) |v| s: {
@@ -159,7 +159,7 @@ fn mainServer(init: std.process.Init.Minimal) !void {
                 testing.io_instance.deinit();
                 const leak_count = testing.allocator_instance.detectLeaks();
                 testing.allocator_instance.deinitWithoutLeakChecks();
-                try server.serveTestResults(.{
+                server.serveTestResults(.{
                     .index = index,
                     .flags = .{
                         .status = status,
@@ -173,7 +173,7 @@ fn mainServer(init: std.process.Init.Minimal) !void {
                             leak_count,
                         ),
                     },
-                });
+                }) catch |err| std.debug.panic("failed to serveTestResults: {t}", .{err});
             },
             .start_fuzzing => {
                 // This ensures that this code won't be analyzed and hence reference fuzzer symbols
