@@ -8249,7 +8249,18 @@ fn fileReadStreamingWindows(file: File, data: []const []u8) File.Reader.Error!us
             null, // byte offset
             null, // key
         )) {
-            .SUCCESS, .END_OF_FILE, .PIPE_BROKEN => {
+            .SUCCESS => {
+                // Only END_OF_FILE is the true end.
+                if (io_status_block.Information == 0) {
+                    try syscall.checkCancel();
+                    continue;
+                } else {
+                    syscall.finish();
+                    io_status_block.u.Status = .SUCCESS;
+                    return io_status_block.Information;
+                }
+            },
+            .END_OF_FILE, .PIPE_BROKEN => {
                 syscall.finish();
                 return io_status_block.Information;
             },
