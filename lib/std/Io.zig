@@ -264,10 +264,7 @@ pub fn Poller(comptime StreamEnum: type) type {
                 // always check if there's some data waiting to be read first.
                 if (poll_fd.revents & posix.POLL.IN != 0) {
                     const buf = try writableSliceGreedyAlloc(r, gpa, bump_amt);
-                    const amt = posix.read(poll_fd.fd, buf) catch |err| switch (err) {
-                        error.BrokenPipe => 0, // Handle the same as EOF.
-                        else => |e| return e,
-                    };
+                    const amt = try posix.read(poll_fd.fd, buf);
                     advanceBufferEnd(r, amt);
                     if (amt == 0) {
                         // Remove the fd when the EOF condition is met.
@@ -633,9 +630,9 @@ pub const VTable = struct {
     fileWritePositional: *const fn (?*anyopaque, File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) File.WritePositionalError!usize,
     fileWriteFileStreaming: *const fn (?*anyopaque, File, header: []const u8, *Io.File.Reader, Io.Limit) File.Writer.WriteFileError!usize,
     fileWriteFilePositional: *const fn (?*anyopaque, File, header: []const u8, *Io.File.Reader, Io.Limit, offset: u64) File.WriteFilePositionalError!usize,
-    /// Returns 0 on end of stream.
-    fileReadStreaming: *const fn (?*anyopaque, File, data: []const []u8) File.Reader.Error!usize,
-    /// Returns 0 on end of stream.
+    /// May return 0 reads which is different than `error.EndOfStream`.
+    fileReadStreaming: *const fn (?*anyopaque, File, data: []const []u8) File.ReadStreamingError!usize,
+    /// Returns 0 if reading at or past the end.
     fileReadPositional: *const fn (?*anyopaque, File, data: []const []u8, offset: u64) File.ReadPositionalError!usize,
     fileSeekBy: *const fn (?*anyopaque, File, relative_offset: i64) File.SeekError!void,
     fileSeekTo: *const fn (?*anyopaque, File, absolute_offset: u64) File.SeekError!void,

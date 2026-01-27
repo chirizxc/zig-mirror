@@ -550,11 +550,13 @@ pub fn setTimestampsNow(file: File, io: Io) SetTimestampsError!void {
     });
 }
 
+pub const ReadStreamingError = error{EndOfStream} || Reader.Error;
+
 /// Returns 0 on stream end or if `buffer` has no space available for data.
 ///
 /// See also:
 /// * `reader`
-pub fn readStreaming(file: File, io: Io, buffer: []const []u8) Reader.Error!usize {
+pub fn readStreaming(file: File, io: Io, buffer: []const []u8) ReadStreamingError!usize {
     return io.vtable.fileReadStreaming(io.userdata, file, buffer);
 }
 
@@ -563,7 +565,6 @@ pub const ReadPositionalError = error{
     SystemResources,
     /// Trying to read a directory file descriptor as if it were a file.
     IsDir,
-    BrokenPipe,
     /// Non-blocking has been enabled, and reading from the file descriptor
     /// would block.
     WouldBlock,
