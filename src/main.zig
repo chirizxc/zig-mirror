@@ -3446,12 +3446,6 @@ fn buildOutputType(
         src.src_path = try dirs.local_cache.join(arena, &.{sub_path});
     }
 
-    if (build_options.have_llvm and emit_asm_resolved != .no) {
-        // LLVM has no way to set this non-globally.
-        const argv = [_][*:0]const u8{ "zig (LLVM option parsing)", "--x86-asm-syntax=intel" };
-        @import("codegen/llvm/bindings.zig").ParseCommandLineOptions(argv.len, &argv);
-    }
-
     const clang_passthrough_mode = switch (arg_mode) {
         .cc, .cpp, .translate_c => true,
         else => false,

@@ -468,10 +468,6 @@ bool ZigLLVMGetBrokenDebugInfo(LLVMContextRef context_ref) {
         unwrap(context_ref)->getDiagHandlerPtr())->BrokenDebugInfo;
 }
 
-void ZigLLVMParseCommandLineOptions(size_t argc, const char *const *argv) {
-    cl::ParseCommandLineOptions(argc, argv);
-}
-
 bool ZigLLVMWriteArchive(const char *archive_name, const char **file_names, size_t file_name_count,
     ZigLLVMArchiveKind archive_kind)
 {

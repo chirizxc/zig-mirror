@@ -335,9 +335,6 @@ extern fn ZigLLVMWriteArchive(
     archive_kind: ArchiveKind,
 ) bool;
 
-pub const ParseCommandLineOptions = ZigLLVMParseCommandLineOptions;
-extern fn ZigLLVMParseCommandLineOptions(argc: usize, argv: [*]const [*:0]const u8) void;
-
 pub const GetHostCPUName = LLVMGetHostCPUName;
 extern fn LLVMGetHostCPUName() ?[*:0]u8;
 
