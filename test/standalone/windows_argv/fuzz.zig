@@ -149,6 +149,13 @@ fn spawnVerify(verify_path: [:0]const u16, cmd_line: [:0]const u16) !windows.DWO
         break :spawn proc_info.hProcess;
     };
     defer windows.CloseHandle(child_proc);
+    const infinite_timeout: windows.LARGE_INTEGER = std.math.minInt(windows.LARGE_INTEGER);
+    switch (windows.ntdll.NtWaitForSingleObject(child_proc, windows.FALSE, &infinite_timeout)) {
+        .WAIT_0 => {},
+        .ABANDONED_WAIT_0 => return error.WaitAbandoned,
+        .TIMEOUT => return error.WaitTimeOut,
+        else => |status| return windows.unexpectedStatus(status),
+    }
     try windows.WaitForSingleObjectEx(child_proc, windows.INFINITE, false);
 
     var exit_code: windows.DWORD = undefined;
