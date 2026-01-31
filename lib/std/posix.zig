@@ -574,61 +574,6 @@ pub fn fanotify_init(flags: std.os.linux.fanotify.InitFlags, event_f_flags: u32)
     }
 }
 
-pub const FanotifyMarkError = error{
-    MarkAlreadyExists,
-    IsDir,
-    NotAssociatedWithFileSystem,
-    FileNotFound,
-    SystemResources,
-    UserMarkQuotaExceeded,
-    NotDir,
-    OperationUnsupported,
-    PermissionDenied,
-    CrossDevice,
-    NameTooLong,
-} || UnexpectedError;
-
-pub fn fanotify_mark(
-    fanotify_fd: fd_t,
-    flags: std.os.linux.fanotify.MarkFlags,
-    mask: std.os.linux.fanotify.MarkMask,
-    dirfd: fd_t,
-    pathname: ?[]const u8,
-) FanotifyMarkError!void {
-    if (pathname) |path| {
-        const path_c = try toPosixPath(path);
-        return fanotify_markZ(fanotify_fd, flags, mask, dirfd, &path_c);
-    } else {
-        return fanotify_markZ(fanotify_fd, flags, mask, dirfd, null);
-    }
-}
-
-pub fn fanotify_markZ(
-    fanotify_fd: fd_t,
-    flags: std.os.linux.fanotify.MarkFlags,
-    mask: std.os.linux.fanotify.MarkMask,
-    dirfd: fd_t,
-    pathname: ?[*:0]const u8,
-) FanotifyMarkError!void {
-    const rc = system.fanotify_mark(fanotify_fd, flags, mask, dirfd, pathname);
-    switch (errno(rc)) {
-        .SUCCESS => return,
-        .BADF => unreachable,
-        .EXIST => return error.MarkAlreadyExists,
-        .INVAL => unreachable,
-        .ISDIR => return error.IsDir,
-        .NODEV => return error.NotAssociatedWithFileSystem,
-        .NOENT => return error.FileNotFound,
-        .NOMEM => return error.SystemResources,
-        .NOSPC => return error.UserMarkQuotaExceeded,
-        .NOTDIR => return error.NotDir,
-        .OPNOTSUPP => return error.OperationUnsupported,
-        .PERM => return error.PermissionDenied,
-        .XDEV => return error.CrossDevice,
-        else => |err| return unexpectedErrno(err),
-    }
-}
-
 pub const MMapError = error{
     /// The underlying filesystem of the specified file does not support memory mapping.
     MemoryMappingNotSupported,
@@ -1760,44 +1705,6 @@ pub fn ptrace(request: u32, pid: pid_t, addr: usize, data: usize) PtraceError!vo
 
         else => @compileError("std.posix.ptrace unimplemented for target OS"),
     };
-}
-
-pub const NameToFileHandleAtError = error{
-    FileNotFound,
-    NotDir,
-    OperationUnsupported,
-    NameTooLong,
-    Unexpected,
-};
-
-pub fn name_to_handle_at(
-    dirfd: fd_t,
-    pathname: []const u8,
-    handle: *std.os.linux.file_handle,
-    mount_id: *i32,
-    flags: u32,
-) NameToFileHandleAtError!void {
-    const pathname_c = try toPosixPath(pathname);
-    return name_to_handle_atZ(dirfd, &pathname_c, handle, mount_id, flags);
-}
-
-pub fn name_to_handle_atZ(
-    dirfd: fd_t,
-    pathname_z: [*:0]const u8,
-    handle: *std.os.linux.file_handle,
-    mount_id: *i32,
-    flags: u32,
-) NameToFileHandleAtError!void {
-    switch (errno(system.name_to_handle_at(dirfd, pathname_z, handle, mount_id, flags))) {
-        .SUCCESS => {},
-        .FAULT => unreachable, // pathname, mount_id, or handle outside accessible address space
-        .INVAL => unreachable, // bad flags, or handle_bytes too big
-        .NOENT => return error.FileNotFound,
-        .NOTDIR => return error.NotDir,
-        .OPNOTSUPP => return error.OperationUnsupported,
-        .OVERFLOW => return error.NameTooLong,
-        else => |err| return unexpectedErrno(err),
-    }
 }
 
 pub const IoCtl_SIOCGIFINDEX_Error = error{

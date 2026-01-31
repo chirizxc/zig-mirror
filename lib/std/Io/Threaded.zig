@@ -2492,6 +2492,10 @@ fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Oper
                 else => |e| e,
             },
         },
+        .watch_init => |o| return .{ .watch_init = watchInit(t, o.w) },
+        .watch_deinit => |o| return .{ .watch_deinit = watchDeinit(t, o.w) },
+        .watch_mark_dir => |o| return .{ .watch_mark_dir = watchMarkDir(t, o.w, o.dir, o.sub_path) },
+        .watch_wait => |o| return .{ .watch_wait = watchWait(t, o.w) },
     }
 }
 
@@ -17714,5 +17718,218 @@ fn mmSyncWrite(file: File, memory: []u8, offset: u64) File.WritePositionalError!
                 else => |err| return syscall.unexpectedErrno(err),
             }
         }
+    }
+}
+
+const LinuxWatch = struct {
+    /// Key is the directory to watch which contains one or more files we are
+    /// interested in noticing changes to.
+    dir_table: DirTable,
+    /// Keyed differently but indexes correspond 1:1 with `dir_table`.
+    handle_table: HandleTable,
+    /// fanotify file descriptors are keyed by mount id since marks
+    /// are limited to a single filesystem.
+    poll_fds: std.AutoArrayHashMapUnmanaged(MountId, posix.pollfd),
+
+    const MountId = i32;
+    const HandleTable = std.ArrayHashMapUnmanaged(FileHandle, MountId, FileHandle.Adapter, false);
+    const DirTable = std.ArrayHashMapUnmanaged(Path, void, Path.TableAdapter, false);
+
+    const Hash = std.hash.Wyhash;
+
+    const Path = struct {
+        dir: Dir,
+        sub_path: []const u8,
+
+        pub fn eql(self: Path, other: Path) bool {
+            return self.dir.handle == other.dir.handle and std.mem.eql(u8, self.sub_path, other.sub_path);
+        }
+
+        /// Useful to make `Path` a key in `std.ArrayHashMap`.
+        pub const TableAdapter = struct {
+            pub fn hash(self: TableAdapter, a: Path) u32 {
+                _ = self;
+                const seed: u32 = @bitCast(a.dir.handle);
+                return @truncate(Hash.hash(seed, a.sub_path));
+            }
+            pub fn eql(self: TableAdapter, a: Path, b: Path, b_index: usize) bool {
+                _ = self;
+                _ = b_index;
+                return a.eql(b);
+            }
+        };
+    };
+
+    const fan_mask: std.os.linux.fanotify.MarkMask = .{
+        .CLOSE_WRITE = true,
+        .CREATE = true,
+        .DELETE = true,
+        .DELETE_SELF = true,
+        .EVENT_ON_CHILD = true,
+        .MOVED_FROM = true,
+        .MOVED_TO = true,
+        .MOVE_SELF = true,
+        .ONDIR = true,
+    };
+
+    const FileHandle = struct {
+        handle: *align(1) std.os.linux.file_handle,
+
+        fn clone(lfh: FileHandle, gpa: Allocator) Allocator.Error!FileHandle {
+            const bytes = lfh.slice();
+            const new_ptr = try gpa.alignedAlloc(
+                u8,
+                .of(std.os.linux.file_handle),
+                @sizeOf(std.os.linux.file_handle) + bytes.len,
+            );
+            const new_header: *std.os.linux.file_handle = @ptrCast(new_ptr);
+            new_header.* = lfh.handle.*;
+            const new: FileHandle = .{ .handle = new_header };
+            @memcpy(new.slice(), lfh.slice());
+            return new;
+        }
+
+        const Adapter = struct {
+            pub fn hash(self: Adapter, a: FileHandle) u32 {
+                _ = self;
+                const unsigned_type: u32 = @bitCast(a.handle.handle_type);
+                return @truncate(Hash.hash(unsigned_type, a.slice()));
+            }
+            pub fn eql(self: Adapter, a: FileHandle, b: FileHandle, b_index: usize) bool {
+                _ = self;
+                _ = b_index;
+                return a.handle.handle_type == b.handle.handle_type and std.mem.eql(u8, a.slice(), b.slice());
+            }
+        };
+    };
+
+    fn getDirHandle(gpa: Allocator, path: std.Build.Cache.Path, mount_id: *MountId) !FileHandle {
+        var file_handle_buffer: [@sizeOf(std.os.linux.file_handle) + 128]u8 align(@alignOf(std.os.linux.file_handle)) = undefined;
+        var buf: [Dir.max_path_bytes]u8 = undefined;
+        const adjusted_path = if (path.sub_path.len == 0) "./" else std.fmt.bufPrint(&buf, "{s}/", .{
+            path.sub_path,
+        }) catch return error.NameTooLong;
+        const stack_ptr: *std.os.linux.file_handle = @ptrCast(&file_handle_buffer);
+        stack_ptr.handle_bytes = file_handle_buffer.len - @sizeOf(std.os.linux.file_handle);
+
+        switch (posix.errno(posix.system.name_to_handle_at(path.root_dir.handle.handle, adjusted_path, stack_ptr, mount_id, std.os.linux.AT.HANDLE_FID))) {
+            .SUCCESS => {},
+            .FAULT => unreachable, // pathname, mount_id, or handle outside accessible address space
+            .INVAL => unreachable, // bad flags, or handle_bytes too big
+            .NOENT => return error.FileNotFound,
+            .NOTDIR => return error.NotDir,
+            .OPNOTSUPP => return error.OperationUnsupported,
+            .OVERFLOW => return error.NameTooLong,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+
+        const stack_lfh: FileHandle = .{ .handle = stack_ptr };
+        return stack_lfh.clone(gpa);
+    }
+
+    fn markDir(lw: *LinuxWatch, t: *Threaded, path: Path) File.Watch.MarkError!void {
+        const gpa = t.allocator;
+        const gop = try lw.dir_table.getOrPut(gpa, path);
+        if (!gop.found_existing) {
+            var mount_id: MountId = undefined;
+            const dir_handle = getDirHandle(gpa, path, &mount_id) catch |err| switch (err) {
+                error.FileNotFound => {
+                    assert(lw.dir_table.swapRemove(path));
+                    return;
+                },
+                else => return err,
+            };
+            const fan_fd = blk: {
+                const fd_gop = try lw.poll_fds.getOrPut(gpa, mount_id);
+                if (!fd_gop.found_existing) {
+                    const fan_fd = std.posix.fanotify_init(.{
+                        .CLASS = .NOTIF,
+                        .CLOEXEC = true,
+                        .NONBLOCK = true,
+                        .REPORT_NAME = true,
+                        .REPORT_DIR_FID = true,
+                        .REPORT_FID = true,
+                        .REPORT_TARGET_FID = true,
+                    }, 0) catch |err| switch (err) {
+                        error.UnsupportedFlags => return error.UnsupportedOperation,
+                        else => |e| return e,
+                    };
+                    fd_gop.value_ptr.* = .{
+                        .fd = fan_fd,
+                        .events = std.posix.POLL.IN,
+                        .revents = undefined,
+                    };
+                }
+                break :blk fd_gop.value_ptr.*.fd;
+            };
+            // `dir_handle` may already be present in the table in
+            // the case that we have multiple Cache.Path instances
+            // that compare inequal but ultimately point to the same
+            // directory on the file system.
+            // In such case, we must revert adding this directory, but keep
+            // the additions to the step set.
+            const dh_gop = try lw.handle_table.getOrPut(gpa, dir_handle);
+            if (dh_gop.found_existing) {
+                _ = lw.dir_table.pop();
+            } else {
+                assert(dh_gop.index == gop.index);
+                dh_gop.value_ptr.* = .{ .mount_id = mount_id, .reaction_set = .{} };
+                posix.fanotify_mark(fan_fd, .{
+                    .ADD = true,
+                    .ONLYDIR = true,
+                }, fan_mask, path.root_dir.handle.handle, path.subPathOrDot()) catch |err| {
+                    fatal("unable to watch {f}: {s}", .{ path, @errorName(err) });
+                };
+            }
+            break :rs &dh_gop.value_ptr.reaction_set;
+        }
+        break :rs &w.os.handle_table.values()[gop.index].reaction_set;
+        @panic("TODO");
+    }
+};
+
+fn watchInit(t: *Threaded, w: *Io.Watch) File.Watch.InitError!void {
+    switch (native_os) {
+        .linux => {
+            w.* = .{
+                .queue = .empty,
+                .implementation = try LinuxWatch.create(t, w),
+            };
+        },
+        else => return error.OperationUnsupported,
+    }
+}
+
+fn watchDeinit(t: *Threaded, w: *Io.Watch) void {
+    const gpa = t.allocator;
+    switch (native_os) {
+        .linux => {
+            const ptr: *LinuxWatch = @alignCast(@ptrCast(w.implementation));
+            ptr.destroy(t);
+        },
+        else => unreachable,
+    }
+    w.* = undefined;
+}
+
+fn watchMarkDir(t: *Threaded, w: *Io.Watch, dir: Dir, sub_path: []const u8) File.Watch.MarkError!void {
+    switch (native_os) {
+        .linux => {
+            const lw: *LinuxWatch = @alignCast(@ptrCast(w.implementation));
+            return lw.markDir(t, .{ .dir = dir, .sub_path = sub_path });
+        },
+        else => unreachable,
+    }
+}
+
+/// Populates `events`, blocking until at least one event is added.
+/// Blocking can be interrupted by closing the queue.
+fn watchWait(t: *Threaded, w: *Io.Watch, io: Io) File.Watch.WaitError!void {
+    switch (native_os) {
+        .linux => {
+            const lw: *LinuxWatch = @alignCast(@ptrCast(w.implementation));
+            return lw.watchWait(t);
+        },
+        else => unreachable,
     }
 }

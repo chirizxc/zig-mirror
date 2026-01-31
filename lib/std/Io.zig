@@ -257,6 +257,10 @@ pub const VTable = struct {
 
 pub const Operation = union(enum) {
     file_read_streaming: FileReadStreaming,
+    watch_init: WatchInit,
+    watch_deinit: WatchDeinit,
+    watch_mark_dir: WatchMarkDir,
+    watch_wait: WatchWait,
 
     pub const Tag = @typeInfo(Operation).@"union".tag_type.?;
 
@@ -287,7 +291,41 @@ pub const Operation = union(enum) {
             LockViolation,
         } || Io.UnexpectedError;
 
-        pub const Result = usize;
+        pub const Result = Error!usize;
+    };
+
+    pub const WatchInit = struct {
+        w: *File.Watch,
+
+        pub const Error = error{
+            OutOfMemory,
+        };
+
+        pub const Result = Error!void;
+    };
+
+    pub const WatchDeinit = struct {
+        w: *File.Watch,
+
+        pub const Result = void;
+    };
+
+    pub const WatchMarkDir = struct {
+        w: *File.Watch,
+        dir: Dir,
+        sub_path: []const u8,
+
+        pub const Error = error{NotDir};
+
+        pub const Result = Error!void;
+    };
+
+    pub const WatchWait = struct {
+        w: *File.Watch,
+
+        pub const Error = error{};
+
+        pub const Result = Error!void;
     };
 
     pub const Result = Result: {
@@ -296,7 +334,7 @@ pub const Operation = union(enum) {
         var field_types: [operation_fields.len]type = undefined;
         for (operation_fields, &field_names, &field_types) |field, *field_name, *field_type| {
             field_name.* = field.name;
-            field_type.* = field.type.Error!field.type.Result;
+            field_type.* = field.type.Result;
         }
         break :Result @Union(.auto, Tag, &field_names, &field_types, &@splat(.{}));
     };

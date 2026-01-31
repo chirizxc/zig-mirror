@@ -844,6 +844,50 @@ pub fn createMemoryMap(file: File, io: Io, options: MemoryMap.CreateOptions) Mem
     return .create(io, file, options);
 }
 
+pub const Watch = struct {
+    implementation: ?*anyopaque,
+    events: Io.Queue(Event),
+
+    pub const Event = union(enum) {
+        /// File system watch queue overflowed; some events will be dropped.
+        overflow,
+        change: Change,
+
+        pub const Change = struct {
+            dir: Dir,
+            sub_path: []const u8,
+        };
+    };
+
+    pub const InitError = Io.Operation.WatchInit.Error;
+
+    pub fn init(w: *Watch, io: Io) InitError!void {
+        return (try io.operate(.{ .watch_init = .{ .w = w } })).watch_init;
+    }
+
+    pub fn deinit(w: *Watch, io: Io) void {
+        return (try io.operate(.{ .watch_deinit = .{ .w = w } })).watch_deinit;
+    }
+
+    pub const MarkError = Io.Operation.WatchMarkDir.Error;
+
+    pub fn markDir(w: *Watch, io: Io, dir: Dir, sub_path: []const u8) MarkError!void {
+        return (try io.operate(.{ .watch_mark_dir = .{
+            .w = w,
+            .dir = dir,
+            .sub_path = sub_path,
+        } })).watch_mark_dir;
+    }
+
+    pub const WaitError = error{};
+
+    /// Populates `events`, blocking until at least one event is added.
+    /// Blocking can be interrupted by closing the queue.
+    pub fn wait(w: *Watch, io: Io) WaitError!void {
+        return (try io.operate(.{ .watch_wait = .{ .w = w } })).watch_wait;
+    }
+};
+
 test {
     _ = Reader;
     _ = Writer;
