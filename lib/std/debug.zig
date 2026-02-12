@@ -285,7 +285,7 @@ pub fn lockStderr(buffer: []u8) Io.LockedStderr {
     const prev = io.swapCancelProtection(.blocked);
     defer _ = io.swapCancelProtection(prev);
     return io.lockStderr(buffer, null) catch |err| switch (err) {
-        error.Canceled => unreachable, // Cancel protection enabled above.
+        error.Canceled => unreachable, // blocked
     };
 }
 
@@ -463,13 +463,9 @@ pub fn panicExtra(
     std.builtin.panic.call(msg, ret_addr);
 }
 
-/// Non-zero whenever the program triggered a panic.
-/// The counter is incremented/decremented atomically.
-var panicking = std.atomic.Value(u8).init(0);
-
 /// Counts how many times the panic handler is invoked by this thread.
 /// This is used to catch and handle panics triggered by the panic handler.
-threadlocal var panic_stage: usize = 0;
+threadlocal var recursive_panic_writer: ?*Io.Writer = null;
 
 /// For backends that cannot handle the language features depended on by the
 /// default panic handler, we will use a simpler implementation.
@@ -533,74 +529,51 @@ pub fn defaultPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         else => {},
     }
 
-    // Don't try to cancel during a panic. No need to re-enable cancelation,
-    // because the panic handler doesn't return.
-    _ = std.Options.debug_io.swapCancelProtection(.blocked);
-
-    if (enable_segfault_handler) {
-        // If a segfault happens while panicking, we want it to actually segfault, not trigger
-        // the handler.
-        resetSegfaultHandler();
-    }
-
     // There is very similar logic to the following in `handleSegfault`.
-    switch (panic_stage) {
-        0 => {
-            panic_stage = 1;
-            _ = panicking.fetchAdd(1, .seq_cst);
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const current_recursive_panic_writer = recursive_panic_writer;
+    recursive_panic_writer = &discarding.writer;
+    if (current_recursive_panic_writer) |writer| {
+        // A panic happened while trying to print a previous panic message.
+        writer.writeAll("aborting due to recursive panic\n") catch {};
+    } else trace: {
+        // Don't try to cancel during a panic. No need to re-enable cancelation,
+        // because the panic handler doesn't return.
+        _ = std.Options.debug_io.swapCancelProtection(.blocked);
 
-            trace: {
-                const stderr = lockStderr(&.{}).terminal();
-                defer unlockStderr();
-                const writer = stderr.writer;
+        const stderr = lockStderr(&.{}).terminal();
+        const writer = stderr.writer;
+        recursive_panic_writer = writer;
 
-                if (builtin.single_threaded) {
-                    writer.print("panic: ", .{}) catch break :trace;
-                } else {
-                    const current_thread_id = std.Thread.getCurrentId();
-                    writer.print("thread {d} panic: ", .{current_thread_id}) catch break :trace;
-                }
-                writer.print("{s}\n", .{msg}) catch break :trace;
+        if (enable_segfault_handler) {
+            // If a segfault happens while panicking, we want it to actually segfault, not trigger
+            // the handler.
+            resetSegfaultHandler();
+        }
 
-                if (@errorReturnTrace()) |t| if (t.index > 0) {
-                    writer.writeAll("error return context:\n") catch break :trace;
-                    writeStackTrace(t, stderr) catch break :trace;
-                    writer.writeAll("\nstack trace:\n") catch break :trace;
-                };
-                writeCurrentStackTrace(.{
-                    .first_address = first_trace_addr orelse @returnAddress(),
-                    .allow_unsafe_unwind = true, // we're crashing anyway, give it our all!
-                }, stderr) catch break :trace;
-            }
+        if (@hasDecl(root, "debug") and @hasDecl(root.debug, "printCrashContext")) {
+            root.debug.printCrashContext(stderr);
+        }
 
-            waitForOtherThreadToFinishPanicking();
-        },
-        1 => {
-            panic_stage = 2;
-            // A panic happened while trying to print a previous panic message.
-            // We're still holding the mutex but that's fine as we're going to
-            // call abort().
-            const stderr = lockStderr(&.{}).terminal();
-            stderr.writer.writeAll("aborting due to recursive panic\n") catch {};
-        },
-        else => {}, // Panicked while printing the recursive panic message.
+        if (builtin.single_threaded) {
+            writer.print("panic: ", .{}) catch break :trace;
+        } else {
+            const current_thread_id = std.Thread.getCurrentId();
+            writer.print("thread {d} panic: ", .{current_thread_id}) catch break :trace;
+        }
+        writer.print("{s}\n", .{msg}) catch break :trace;
+
+        if (@errorReturnTrace()) |t| if (t.index > 0) {
+            writer.writeAll("error return context:\n") catch break :trace;
+            writeStackTrace(t, stderr) catch break :trace;
+            writer.writeAll("\nstack trace:\n") catch break :trace;
+        };
+        writeCurrentStackTrace(.{
+            .first_address = first_trace_addr orelse @returnAddress(),
+            .allow_unsafe_unwind = true, // we're crashing anyway, give it our all!
+        }, stderr) catch break :trace;
     }
-
     std.process.abort();
-}
-
-/// Must be called only after adding 1 to `panicking`. There are three callsites.
-fn waitForOtherThreadToFinishPanicking() void {
-    if (panicking.fetchSub(1, .seq_cst) != 1) {
-        // Another thread is panicking, wait for the last one to finish
-        // and call abort()
-        if (builtin.single_threaded) unreachable;
-
-        // Sleep forever without hammering the CPU
-        var futex: u32 = 0;
-        while (true) std.Options.debug_io.futexWaitUncancelable(u32, &futex, 0);
-        unreachable;
-    }
 }
 
 pub const StackUnwindOptions = struct {
@@ -1535,44 +1508,38 @@ fn handleSegfault(addr: ?usize, name: []const u8, opt_ctx: ?CpuContextPtr) noret
 }
 
 pub fn defaultHandleSegfault(addr: ?usize, name: []const u8, opt_ctx: ?CpuContextPtr) noreturn {
-    // Don't try to cancel during a segfault. No need to re-enable cancelation,
-    // because the segfault handler doesn't return.
-    _ = std.Options.debug_io.swapCancelProtection(.blocked);
-
     // There is very similar logic to the following in `defaultPanic`.
-    switch (panic_stage) {
-        0 => {
-            panic_stage = 1;
-            _ = panicking.fetchAdd(1, .seq_cst);
+    var discarding: Io.Writer.Discarding = .init(&.{});
+    const current_recursive_panic_writer = recursive_panic_writer;
+    recursive_panic_writer = &discarding.writer;
+    if (current_recursive_panic_writer) |writer| {
+        // A segfault happened while trying to print a previous panic message.
+        writer.writeAll("aborting due to recursive panic\n") catch {};
+    } else trace: {
+        // Don't try to cancel during a segfault. No need to re-enable cancelation,
+        // because the segfault handler doesn't return.
+        _ = std.Options.debug_io.swapCancelProtection(.blocked);
 
-            trace: {
-                const stderr = lockStderr(&.{}).terminal();
-                defer unlockStderr();
+        const stderr = lockStderr(&.{}).terminal();
+        const writer = stderr.writer;
+        recursive_panic_writer = writer;
 
-                if (addr) |a| {
-                    stderr.writer.print("{s} at address 0x{x}\n", .{ name, a }) catch break :trace;
-                } else {
-                    stderr.writer.print("{s} (no address available)\n", .{name}) catch break :trace;
-                }
-                if (opt_ctx) |context| {
-                    writeCurrentStackTrace(.{
-                        .context = context,
-                        .allow_unsafe_unwind = true, // we're crashing anyway, give it our all!
-                    }, stderr) catch break :trace;
-                }
-            }
-        },
-        1 => {
-            panic_stage = 2;
-            // A segfault happened while trying to print a previous panic message.
-            // We're still holding the mutex but that's fine as we're going to
-            // call abort().
-            const stderr = lockStderr(&.{}).terminal();
-            stderr.writer.writeAll("aborting due to recursive panic\n") catch {};
-        },
-        else => {}, // Panicked while printing the recursive panic message.
+        if (@hasDecl(root, "debug") and @hasDecl(root.debug, "printCrashContext")) {
+            root.debug.printCrashContext(stderr);
+        }
+
+        if (addr) |a| {
+            writer.print("{s} at address 0x{x}\n", .{ name, a }) catch break :trace;
+        } else {
+            writer.print("{s} (no address available)\n", .{name}) catch break :trace;
+        }
+        if (opt_ctx) |context| {
+            writeCurrentStackTrace(.{
+                .context = context,
+                .allow_unsafe_unwind = true, // we're crashing anyway, give it our all!
+            }, stderr) catch break :trace;
+        }
     }
-
     // We cannot allow the signal handler to return because when it runs the original instruction
     // again, the memory may be mapped and undefined behavior would occur rather than repeating
     // the segfault. So we simply abort here.
