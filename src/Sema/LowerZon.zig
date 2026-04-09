@@ -150,7 +150,8 @@ fn lowerExprAnonResTy(self: *LowerZon, node: Zoir.Node.Index) CompileError!Inter
                     errdefer wip.cancel(ip, pt.tid);
                     const block = self.block;
                     const zcu = pt.zcu;
-                    try self.sema.setTypeName(block, &wip, .anon, "struct", self.base_node_inst.resolve(ip).?);
+                    const type_name, const name_nav = try self.sema.computeTypeName(block, wip.index, .anon, "struct", self.base_node_inst.resolve(ip).?);
+                    wip.setName(ip, type_name, name_nav);
 
                     // Reified structs have field information populated immediately.
                     @memcpy(wip.field_values.get(ip), elems);

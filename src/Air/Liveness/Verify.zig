@@ -96,6 +96,8 @@ fn verifyBody(self: *Verify, body: []const Air.Inst.Index) Error!void {
             .unwrap_errunion_err_ptr,
             .wrap_errunion_payload,
             .wrap_errunion_err,
+            .unwrap_restricted,
+            .unwrap_restricted_safe,
             .slice_ptr,
             .slice_len,
             .ptr_slice_len_ptr,

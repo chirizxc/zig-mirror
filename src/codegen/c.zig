@@ -896,6 +896,7 @@ pub const DeclGen = struct {
             // types, not values
             .int_type,
             .ptr_type,
+            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,
@@ -1334,7 +1335,7 @@ pub const DeclGen = struct {
                 return w.writeByte(')');
             },
             .bool_type => try w.writeAll(if (safety_on) "0xaa" else "false"),
-            else => switch (ip.indexToKey(ty.toIntern())) {
+            else => ty: switch (ip.indexToKey(ty.toIntern())) {
                 .simple_type, // anyerror, c_char (etc), usize, isize
                 .int_type,
                 .enum_type,
@@ -1404,6 +1405,9 @@ pub const DeclGen = struct {
                         try dg.renderUndefValue(w, .usize, initializer_type);
                         try w.writeByte('}');
                     },
+                },
+                .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
+                    .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
                 },
                 .opt_type => |child_type| switch (CType.classifyOptional(ty, zcu)) {
                     .npv_payload => unreachable, // opv optional
@@ -2839,6 +2843,9 @@ fn genBodyInner(f: *Function, body: []const Air.Inst.Index) Error!void {
             .err_return_trace            => try airErrReturnTrace(f, inst),
             .set_err_return_trace        => try airSetErrReturnTrace(f, inst),
             .save_err_return_trace_index => try airSaveErrReturnTraceIndex(f, inst),
+
+            .unwrap_restricted      => try airUnwrapRestricted(f, inst, false),
+            .unwrap_restricted_safe => try airUnwrapRestricted(f, inst, true),
 
             .wasm_memory_size => try airWasmMemorySize(f, inst),
             .wasm_memory_grow => try airWasmMemoryGrow(f, inst),
@@ -5527,6 +5534,34 @@ fn airWrapErrUnionErr(f: *Function, inst: Air.Inst.Index) !CValue {
     try f.writeCValueMember(w, local, .{ .identifier = "error" });
     try w.writeAll(" = ");
     try f.writeCValue(w, err, .other);
+    try w.writeByte(';');
+    try f.newline();
+
+    return local;
+}
+
+fn airUnwrapRestricted(f: *Function, inst: Air.Inst.Index, safety: bool) !CValue {
+    const pt = f.dg.pt;
+    const zcu = pt.zcu;
+    const ty_op = f.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
+
+    const unrestricted_ty = ty_op.ty.toType();
+    const restricted_ty = f.typeOf(ty_op.operand);
+    const operand = try f.resolveInst(ty_op.operand);
+    try reap(f, inst, &.{ty_op.operand});
+
+    const w = &f.code.writer;
+    const local = try f.allocLocal(inst, unrestricted_ty);
+
+    try f.writeCValue(w, local, .other);
+    try w.writeAll(" = ");
+    switch (restricted_ty.restrictedRepr(zcu)) {
+        .double_pointer => {
+            _ = safety; // TODO
+            try f.writeCValueDeref(w, operand);
+        },
+        .single_pointer => try f.writeCValue(w, operand, .other),
+    }
     try w.writeByte(';');
     try f.newline();
 

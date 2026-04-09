@@ -622,6 +622,14 @@ const Writer = struct {
                 try stream.writeAll(")) ");
                 try self.writeSrcNode(stream, extra.node);
             },
+            .reify_restricted => {
+                const extra = self.code.extraData(Zir.Inst.UnNode, extended.operand).data;
+                const name_strat: Zir.Inst.NameStrategy = @enumFromInt(extended.small);
+                try stream.print("{t}, ", .{name_strat});
+                try self.writeInstRef(stream, extra.operand);
+                try stream.writeAll(")) ");
+                try self.writeSrcNode(stream, extra.node);
+            },
             .reify_fn => {
                 const extra = self.code.extraData(Zir.Inst.ReifyFn, extended.operand).data;
                 try self.writeInstRef(stream, extra.param_types);

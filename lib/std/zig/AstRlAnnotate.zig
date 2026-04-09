@@ -903,6 +903,7 @@ fn builtinCall(astrl: *AstRlAnnotate, block: ?*Block, ri: ResultInfo, node: Ast.
         .error_name,
         .set_runtime_safety,
         .Tuple,
+        .Restricted,
         .wasm_memory_size,
         .splat,
         .set_float_mode,

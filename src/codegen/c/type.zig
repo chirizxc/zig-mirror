@@ -284,6 +284,20 @@ pub const CType = union(enum) {
 
                 .pointer => {
                     const ptr = cur_ty.ptrInfo(zcu);
+                    if (cur_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (cur_ty.restrictedRepr(zcu)) {
+                        .double_pointer => {
+                            const unrestricted_cty = try lowerInner(unrestricted_ty, true, deps, arena, zcu);
+                            const unrestricted_cty_buf = try arena.create(CType);
+                            unrestricted_cty_buf.* = unrestricted_cty;
+                            return .{ .pointer = .{
+                                .@"const" = true,
+                                .@"volatile" = false,
+                                .elem_ty = unrestricted_cty_buf,
+                                .nonstring = false,
+                            } };
+                        },
+                        .single_pointer => {},
+                    };
                     switch (ptr.flags.size) {
                         .slice => {
                             try deps.addType(gpa, cur_ty, allow_incomplete);
@@ -912,7 +926,10 @@ pub const CType = union(enum) {
                 .optional => try w.print("opt_{f}", .{fmtZigType(ty.optionalChild(zcu), zcu)}),
                 .error_union => try w.print("errunion_{f}", .{fmtZigType(ty.errorUnionPayload(zcu), zcu)}),
 
-                .pointer => switch (ty.ptrSize(zcu)) {
+                .pointer => if (ty.unrestrictedType(zcu)) |_| {
+                    const name = ty.containerTypeName(ip).toSlice(ip);
+                    try w.print("{f}", .{@import("../c.zig").fmtIdentUnsolo(name)});
+                } else switch (ty.ptrSize(zcu)) {
                     .one, .many, .c => try w.print("ptr_{f}", .{fmtZigType(ty.childType(zcu), zcu)}),
                     .slice => try w.print("slice_{f}", .{fmtZigType(ty.childType(zcu), zcu)}),
                 },
@@ -985,6 +1002,7 @@ pub const CType = union(enum) {
         return switch (ip.indexToKey(ty.toIntern())) {
             .int_type,
             .ptr_type,
+            .restricted_ptr_type,
             .anyframe_type,
             .simple_type,
             .opaque_type,

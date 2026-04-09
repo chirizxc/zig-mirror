@@ -658,6 +658,28 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
             air_inst_index = air_body[air_body_index];
             continue :air_tag air_tags[@intFromEnum(air_inst_index)];
         },
+        .unwrap_restricted, .unwrap_restricted_safe => {
+            const ty_op = air_data[@intFromEnum(air_inst_index)].ty_op;
+
+            maybe_noop: {
+                switch (isel.air.typeOf(ty_op.operand, ip).restrictedRepr(zcu)) {
+                    .double_pointer => break :maybe_noop,
+                    .single_pointer => {},
+                }
+                if (true) break :maybe_noop;
+                if (ty_op.operand.toIndex()) |src_air_inst_index| {
+                    if (isel.hints.get(src_air_inst_index)) |hint_vpsi| {
+                        try isel.hints.putNoClobber(gpa, air_inst_index, hint_vpsi);
+                    }
+                }
+            }
+            try isel.analyzeUse(ty_op.operand);
+            try isel.def_order.putNoClobber(gpa, air_inst_index, {});
+
+            air_body_index += 1;
+            air_inst_index = air_body[air_body_index];
+            continue :air_tag air_tags[@intFromEnum(air_inst_index)];
+        },
         .struct_field_ptr, .struct_field_val => {
             const ty_pl = air_data[@intFromEnum(air_inst_index)].ty_pl;
             const extra = isel.air.extraData(Air.StructField, ty_pl.payload).data;
@@ -5733,6 +5755,29 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                     var payload_part_it = error_union_vi.value.field(error_union_ty, payload_offset, payload_size);
                     const payload_part_vi = try payload_part_it.only(isel);
                     try payload_part_vi.?.defUndef(isel, payload_ty, .{});
+                }
+            }
+            if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
+        },
+        .unwrap_restricted, .unwrap_restricted_safe => |air_tag| {
+            if (isel.live_values.fetchRemove(air.inst_index)) |dst_vi| {
+                defer dst_vi.value.deref(isel);
+                const ty_op = air.data(air.inst_index).ty_op;
+                const unrestricted_ty = ty_op.ty.toType();
+                const restricted_ty = isel.air.typeOf(ty_op.operand, ip);
+                switch (restricted_ty.restrictedRepr(zcu)) {
+                    .double_pointer => {
+                        switch (air_tag) {
+                            else => unreachable,
+                            .unwrap_restricted => {},
+                            .unwrap_restricted_safe => {}, // TODO
+                        }
+                        const ptr_vi = try isel.use(ty_op.operand);
+                        const ptr_mat = try ptr_vi.matReg(isel);
+                        _ = try dst_vi.value.load(isel, unrestricted_ty, ptr_mat.ra, .{});
+                        try ptr_mat.finish(isel);
+                    },
+                    .single_pointer => try dst_vi.value.move(isel, ty_op.operand),
                 }
             }
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;

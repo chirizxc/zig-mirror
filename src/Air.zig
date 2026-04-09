@@ -633,6 +633,16 @@ pub const Inst = struct {
         /// wrap from E to E!T
         /// Uses the `ty_op` field.
         wrap_errunion_err,
+        /// Converts a runtime restricted pointer into the corresponding unrestricted pointer.
+        /// Uses the `ty_op` field.
+        unwrap_restricted,
+        /// Converts a runtime restricted pointer into the corresponding unrestricted pointer.
+        /// All invalid pointers are a guaranteed safety panic, which is only applicable
+        /// when the restricted pointer type belongs to a module with safety enabled.
+        /// The panic handler function must be populated before lowering AIR
+        /// that contains this instruction.
+        /// Uses the `ty_op` field.
+        unwrap_restricted_safe,
         /// Given a pointer to a struct or union and a field index, returns a pointer to the field.
         /// Uses the `ty_pl` field, payload is `StructField`.
         /// TODO rename to `agg_field_ptr`.
@@ -1681,6 +1691,8 @@ pub fn typeOfIndex(air: *const Air, inst: Air.Inst.Index, ip: *const InternPool)
         .unwrap_errunion_err_ptr,
         .wrap_errunion_payload,
         .wrap_errunion_err,
+        .unwrap_restricted,
+        .unwrap_restricted_safe,
         .slice_ptr,
         .ptr_slice_len_ptr,
         .ptr_slice_ptr_ptr,
@@ -1886,6 +1898,7 @@ pub fn mustLower(air: Air, inst: Air.Inst.Index, ip: *const InternPool) bool {
         .unreach,
         .optional_payload_ptr_set,
         .errunion_payload_ptr_set,
+        .unwrap_restricted_safe,
         .set_union_tag,
         .memset,
         .memset_safe,
@@ -2014,6 +2027,7 @@ pub fn mustLower(air: Air, inst: Air.Inst.Index, ip: *const InternPool) bool {
         .unwrap_errunion_payload_ptr,
         .wrap_errunion_payload,
         .wrap_errunion_err,
+        .unwrap_restricted,
         .struct_field_ptr,
         .struct_field_ptr_index_0,
         .struct_field_ptr_index_1,

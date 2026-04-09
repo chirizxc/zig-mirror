@@ -413,6 +413,9 @@ pub fn genBody(self: *FuncGen, body: []const Air.Inst.Index, coverage_point: Air
             .wrap_errunion_payload => try self.airWrapErrUnionPayload(body[i..]),
             .wrap_errunion_err     => try self.airWrapErrUnionErr(body[i..]),
 
+            .unwrap_restricted      => try self.airUnwrapRestricted(inst, false),
+            .unwrap_restricted_safe => try self.airUnwrapRestricted(inst, true),
+
             .wasm_memory_size => try self.airWasmMemorySize(inst),
             .wasm_memory_grow => try self.airWasmMemoryGrow(inst),
 
@@ -3248,6 +3251,22 @@ fn airWrapErrUnionErr(self: *FuncGen, body_tail: []const Air.Inst.Index) Allocat
     // TODO store undef to payload_ptr
     _ = payload_ptr;
     return result_ptr;
+}
+
+fn airUnwrapRestricted(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!Builder.Value {
+    const o = self.object;
+    const zcu = o.zcu;
+    const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
+    const unrestricted_ty = ty_op.ty.toType();
+    const restricted_ty = self.typeOf(ty_op.operand);
+    const operand = try self.resolveInst(ty_op.operand);
+    switch (restricted_ty.restrictedRepr(zcu)) {
+        .double_pointer => {
+            _ = safety; // TODO
+            return self.wip.load(.normal, .ptr, operand, unrestricted_ty.abiAlignment(zcu).toLlvm(), "restricted.unwrap");
+        },
+        .single_pointer => return operand,
+    }
 }
 
 fn airWasmMemorySize(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {

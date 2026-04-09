@@ -501,6 +501,7 @@ pub const BuiltinDecl = enum {
     @"panic.copyLenMismatch",
     @"panic.memcpyAlias",
     @"panic.noreturnReturned",
+    @"panic.corruptRestrictedPointer",
 
     VaList,
 
@@ -588,6 +589,7 @@ pub const BuiltinDecl = enum {
             .@"panic.copyLenMismatch",
             .@"panic.memcpyAlias",
             .@"panic.noreturnReturned",
+            .@"panic.corruptRestrictedPointer",
             => .func,
         };
     }
@@ -661,6 +663,7 @@ pub const SimplePanicId = enum {
     copy_len_mismatch,
     memcpy_alias,
     noreturn_returned,
+    corrupt_restricted_pointer,
 
     pub fn toBuiltin(id: SimplePanicId) BuiltinDecl {
         return switch (id) {
@@ -684,6 +687,7 @@ pub const SimplePanicId = enum {
             .copy_len_mismatch          => .@"panic.copyLenMismatch",
             .memcpy_alias               => .@"panic.memcpyAlias",
             .noreturn_returned          => .@"panic.noreturnReturned",
+            .corrupt_restricted_pointer => .@"panic.corruptRestrictedPointer",
             // zig fmt: on
         };
     }
@@ -4215,7 +4219,7 @@ fn resolveReferencesInner(zcu: *Zcu) Allocator.Error!std.AutoArrayHashMapUnmanag
 
             // Queue any decls within this type which would be automatically analyzed.
             // Keep in sync with analysis queueing logic in `Zcu.PerThread.ScanDeclIter.scanDecl`.
-            const ns = Type.fromInterned(ty).getNamespace(zcu).unwrap().?;
+            const ns = Type.fromInterned(ty).getNamespace(zcu).unwrap() orelse continue;
             for (zcu.namespacePtr(ns).comptime_decls.items) |cu| {
                 // `comptime` decls are always analyzed.
                 const unit: AnalUnit = .wrap(.{ .@"comptime" = cu });

@@ -1208,7 +1208,7 @@ fn nameStratExpr(
             const builtin_name = tree.tokenSlice(builtin_token);
             const info = BuiltinFn.list.get(builtin_name) orelse return null;
             switch (info.tag) {
-                .Enum, .Struct, .Union => {
+                .Restricted, .Enum, .Struct, .Union => {
                     var buf: [2]Ast.Node.Index = undefined;
                     const params = tree.builtinCallParams(&buf, node).?;
                     return try builtinCall(gz, scope, ri, node, params, false, name_strat);
@@ -9318,6 +9318,15 @@ fn builtinCall(
                 .elem_ty = elem_ty,
                 .sentinel = sentinel,
             });
+            return rvalue(gz, ri, result, node);
+        },
+        .Restricted => {
+            const unrestricted_ptr_ty = try typeExpr(gz, scope, params[0]);
+            const result = try gz.addExtendedPayloadSmall(
+                .reify_restricted,
+                @intFromEnum(reify_name_strat),
+                Zir.Inst.UnNode{ .node = gz.nodeIndexToRelative(node), .operand = unrestricted_ptr_ty },
+            );
             return rvalue(gz, ri, result, node);
         },
         .Fn => {

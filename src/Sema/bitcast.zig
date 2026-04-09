@@ -239,6 +239,7 @@ const UnpackValueBits = struct {
         switch (ip.indexToKey(val.toIntern())) {
             .int_type,
             .ptr_type,
+            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,

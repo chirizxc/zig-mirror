@@ -201,6 +201,10 @@ pub fn FullPanic(comptime panicFn: fn ([]const u8, ?usize) noreturn) type {
             @branchHint(.cold);
             call("'noreturn' function returned", @returnAddress());
         }
+        pub fn corruptRestrictedPointer() noreturn {
+            @branchHint(.cold);
+            call("corrupt restricted pointer value", @returnAddress());
+        }
     };
 }
 

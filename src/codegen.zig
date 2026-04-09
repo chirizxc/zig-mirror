@@ -281,6 +281,9 @@ pub fn generateLazySymbol(
             w.writeAll(tag_name) catch unreachable;
             w.writeByte(0) catch unreachable;
         }
+    } else if (Type.fromInterned(lazy_sym.ty).unrestrictedType(zcu)) |unrestricted_ptr_ty| {
+        alignment.* = unrestricted_ptr_ty.abiAlignment(zcu);
+        try w.splatByteAll(0, @divExact(zcu.getTarget().ptrBitWidth(), 8)); // to be filled in later
     } else {
         return zcu.codegenFailType(lazy_sym.ty, "TODO implement generateLazySymbol for {s} {f}", .{
             @tagName(lazy_sym.kind), Type.fromInterned(lazy_sym.ty).fmt(pt),
@@ -325,6 +328,7 @@ pub fn generateSymbol(
     switch (ip.indexToKey(val.toIntern())) {
         .int_type,
         .ptr_type,
+        .restricted_ptr_type,
         .array_type,
         .vector_type,
         .opt_type,

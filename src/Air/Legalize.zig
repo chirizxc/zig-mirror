@@ -741,6 +741,8 @@ fn legalizeBody(l: *Legalize, body_start: usize, body_len: usize) Error!void {
             .errunion_payload_ptr_set,
             .wrap_errunion_payload,
             .wrap_errunion_err,
+            .unwrap_restricted,
+            .unwrap_restricted_safe,
             .struct_field_ptr,
             .struct_field_ptr_index_0,
             .struct_field_ptr_index_1,

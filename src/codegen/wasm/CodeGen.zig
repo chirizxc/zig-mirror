@@ -1815,6 +1815,9 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .errunion_payload_ptr_set => cg.airErrUnionPayloadPtrSet(inst),
         .error_name => cg.airErrorName(inst),
 
+        .unwrap_restricted => cg.airUnwrapRestricted(inst, false),
+        .unwrap_restricted_safe => cg.airUnwrapRestricted(inst, true),
+
         .wasm_memory_size => cg.airWasmMemorySize(inst),
         .wasm_memory_grow => cg.airWasmMemoryGrow(inst),
 
@@ -4676,6 +4679,7 @@ fn lowerConstant(cg: *CodeGen, val: Value) InnerError!WValue {
     switch (ip.indexToKey(val.ip_index)) {
         .int_type,
         .ptr_type,
+        .restricted_ptr_type,
         .array_type,
         .vector_type,
         .opt_type,
@@ -6715,6 +6719,22 @@ fn airErrUnionPayloadPtrSet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void 
         }
 
         break :result try cg.buildPointerOffset(operand, @as(u32, @intCast(errUnionPayloadOffset(payload_ty, zcu))), .new);
+    };
+    return cg.finishAir(inst, result, &.{ty_op.operand});
+}
+
+fn airUnwrapRestricted(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
+    const zcu = cg.pt.zcu;
+    const ty_op = cg.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
+    const operand = try cg.resolveInst(ty_op.operand);
+    const unrestricted_ty = ty_op.ty.toType();
+    const restricted_ty = cg.typeOf(ty_op.operand);
+    const result = result: switch (restricted_ty.restrictedRepr(zcu)) {
+        .double_pointer => {
+            _ = safety; // TODO
+            break :result try cg.load(operand, unrestricted_ty, 0);
+        },
+        .single_pointer => cg.reuseOperand(ty_op.operand, operand),
     };
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }

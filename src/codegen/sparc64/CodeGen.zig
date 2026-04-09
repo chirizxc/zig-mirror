@@ -676,6 +676,10 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .wrap_errunion_payload => try self.airWrapErrUnionPayload(inst),
             .wrap_errunion_err     => try self.airWrapErrUnionErr(inst),
 
+            .unwrap_restricted,
+            .unwrap_restricted_safe,
+            => return self.fail("TODO implement restricted pointers", .{}),
+
             .add_optimized,
             .sub_optimized,
             .mul_optimized,

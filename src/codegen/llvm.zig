@@ -3061,6 +3061,7 @@ pub const Object = struct {
                         }),
                     };
                 },
+                .restricted_ptr_type => @panic("TODO implement restricted pointers"),
                 .array_type => |array_type| o.builder.arrayType(
                     array_type.lenIncludingSentinel(),
                     try o.lowerType(.fromInterned(array_type.child)),
@@ -3443,6 +3444,7 @@ pub const Object = struct {
         return switch (val_key) {
             .int_type,
             .ptr_type,
+            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,

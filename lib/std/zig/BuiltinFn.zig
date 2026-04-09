@@ -110,6 +110,7 @@ pub const Tag = enum {
     Int,
     Tuple,
     Pointer,
+    Restricted,
     Fn,
     Struct,
     Union,
@@ -941,6 +942,13 @@ pub const list = list: {
             .{
                 .tag = .Pointer,
                 .param_count = 4,
+            },
+        },
+        .{
+            "@Restricted",
+            .{
+                .tag = .Restricted,
+                .param_count = 1,
             },
         },
         .{

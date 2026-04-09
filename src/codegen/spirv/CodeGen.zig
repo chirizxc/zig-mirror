@@ -774,6 +774,7 @@ fn constant(cg: *CodeGen, ty: Type, val: Value, repr: Repr) Error!Id {
         switch (ip.indexToKey(val.toIntern())) {
             .int_type,
             .ptr_type,
+            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,
@@ -2774,7 +2775,9 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) Error!void {
             .unwrap_errunion_err => try cg.airErrUnionErr(inst),
             .unwrap_errunion_payload => try cg.airErrUnionPayload(inst),
             .wrap_errunion_err => try cg.airWrapErrUnionErr(inst),
-            .wrap_errunion_payload => try cg.airWrapErrUnionPayload(inst),
+             .wrap_errunion_payload => try cg.airWrapErrUnionPayload(inst),
+
+            .unwrap_restricted => return cg.fail("TODO implement restricted pointers", .{}),
 
             .is_null         => try cg.airIsNull(inst, false, .is_null),
             .is_non_null     => try cg.airIsNull(inst, false, .is_non_null),

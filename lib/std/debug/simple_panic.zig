@@ -126,3 +126,7 @@ pub fn memcpyAlias() noreturn {
 pub fn noreturnReturned() noreturn {
     call("'noreturn' function returned", null);
 }
+
+pub fn corruptRestrictedPointer() noreturn {
+    call("corrupt restricted pointer value", null);
+}

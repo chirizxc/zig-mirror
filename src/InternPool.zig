@@ -1969,6 +1969,7 @@ pub const CaptureValue = packed struct(u32) {
 pub const Key = union(enum) {
     int_type: IntType,
     ptr_type: PtrType,
+    restricted_ptr_type: RestrictedPtrType,
     array_type: ArrayType,
     vector_type: VectorType,
     opt_type: Index,
@@ -2092,6 +2093,14 @@ pub const Key = union(enum) {
 
         pub const Size = std.builtin.Type.Pointer.Size;
         pub const AddressSpace = std.builtin.AddressSpace;
+    };
+
+    /// Extern layout so it can be hashed with `std.mem.asBytes`.
+    pub const RestrictedPtrType = extern struct {
+        /// A `reify_restricted` instruction.
+        zir_index: TrackedInst.Index,
+        /// The underlying pointer type.
+        unrestricted_ptr_type: Index,
     };
 
     /// Extern so that hashing can be done via memory reinterpreting.
@@ -2590,6 +2599,7 @@ pub const Key = union(enum) {
         return switch (key) {
             // TODO: assert no padding in these types
             inline .ptr_type,
+            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,
@@ -2606,11 +2616,11 @@ pub const Key = union(enum) {
             .un,
             => |x| Hash.hash(seed, asBytes(&x)),
 
-            .int_type => |x| Hash.hash(seed + @intFromEnum(x.signedness), asBytes(&x.bits)),
+            .int_type => |x| Hash.hash(seed | @shlExact(@as(u64, @intFromEnum(x.signedness)), 63), asBytes(&x.bits)),
 
             .error_union => |x| switch (x.val) {
-                .err_name => |y| Hash.hash(seed + 0, asBytes(&x.ty) ++ asBytes(&y)),
-                .payload => |y| Hash.hash(seed + 1, asBytes(&x.ty) ++ asBytes(&y)),
+                .err_name => |y| Hash.hash(seed | @as(u64, 0 << 63), asBytes(&x.ty) ++ asBytes(&y)),
+                .payload => |y| Hash.hash(seed | @as(u64, 1 << 63), asBytes(&x.ty) ++ asBytes(&y)),
             },
 
             .opaque_type,
@@ -2631,10 +2641,7 @@ pub const Key = union(enum) {
                             std.hash.autoHash(&hasher, cv);
                         }
                     },
-                    .reified => |reified| {
-                        std.hash.autoHash(&hasher, reified.zir_index);
-                        std.hash.autoHash(&hasher, reified.type_hash);
-                    },
+                    .reified => |reified| std.hash.autoHash(&hasher, reified),
                     .generated_union_tag => |union_type| {
                         std.hash.autoHash(&hasher, union_type);
                     },
@@ -2672,7 +2679,7 @@ pub const Key = union(enum) {
                 // Int-to-ptr pointers are hashed separately than decl-referencing pointers.
                 // This is sound due to pointer provenance rules.
                 const addr_tag: Key.Ptr.BaseAddr.Tag = ptr.base_addr;
-                const seed2 = seed + @intFromEnum(addr_tag);
+                const seed2 = seed | @shlExact(@as(u64, @intFromEnum(addr_tag)), 60);
                 const big_offset: i128 = ptr.byte_offset;
                 const common = asBytes(&ptr.ty) ++ asBytes(&big_offset);
                 return switch (ptr.base_addr) {
@@ -3020,6 +3027,8 @@ pub const Key = union(enum) {
                 }
             },
 
+            .restricted_ptr_type => |a_r| return std.meta.eql(a_r, b.restricted_ptr_type),
+
             inline .opaque_type, .enum_type, .union_type, .struct_type => |a_info, a_tag_ct| {
                 const b_info = @field(b, @tagName(a_tag_ct));
                 if (std.meta.activeTag(a_info) != b_info) return false;
@@ -3037,11 +3046,7 @@ pub const Key = union(enum) {
                         };
                         return std.mem.eql(u32, @ptrCast(a_captures), @ptrCast(b_captures));
                     },
-                    .reified => |a_r| {
-                        const b_r = b_info.reified;
-                        return a_r.zir_index == b_r.zir_index and
-                            a_r.type_hash == b_r.type_hash;
-                    },
+                    .reified => |a_r| return std.meta.eql(a_r, b_info.reified),
                     .generated_union_tag => |a_union_ty| return a_union_ty == b_info.generated_union_tag,
                 }
             },
@@ -3125,6 +3130,7 @@ pub const Key = union(enum) {
         return switch (key) {
             .int_type,
             .ptr_type,
+            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,
@@ -3171,6 +3177,8 @@ pub const Key = union(enum) {
         };
     }
 };
+
+pub const LoadedRestrictedType = Tag.TypeRestricted;
 
 pub const LoadedStructType = struct {
     /// Index of the `struct_decl` or `reify` ZIR instruction.
@@ -3498,6 +3506,12 @@ pub const LoadedOpaqueType = struct {
     name_nav: Nav.Index.Optional,
     namespace: NamespaceIndex,
 };
+
+pub fn loadRestrictedType(ip: *const InternPool, index: Index) LoadedRestrictedType {
+    const unwrapped_index = index.unwrap(ip);
+    const item = unwrapped_index.getItem(ip);
+    return extraData(unwrapped_index.getExtra(ip), Tag.TypeRestricted, item.data);
+}
 
 pub fn loadStructType(ip: *const InternPool, index: Index) LoadedStructType {
     const unwrapped_index = index.unwrap(ip);
@@ -4173,6 +4187,7 @@ pub const Index = enum(u32) {
         type_array_small: struct { data: *Vector },
         type_vector: struct { data: *Vector },
         type_pointer: struct { data: *Tag.TypePointer },
+        type_restricted: struct { data: *Tag.TypeRestricted },
         type_slice: DataIsIndex,
         type_optional: DataIsIndex,
         type_anyframe: DataIsIndex,
@@ -4771,6 +4786,9 @@ pub const Tag = enum(u8) {
     /// A slice type.
     /// data is Index of underlying pointer type.
     type_slice,
+    /// A restricted pointer type.
+    /// data is payload to `TypeRestricted`.
+    type_restricted,
     /// An optional type.
     /// data is the child type.
     type_optional,
@@ -5024,13 +5042,6 @@ pub const Tag = enum(u8) {
     /// data is extra index to `MemoizedCall`
     memoized_call,
 
-    const ErrorUnionType = Key.ErrorUnionType;
-    const TypeValue = Key.TypeValue;
-    const Error = Key.Error;
-    const EnumTag = Key.EnumTag;
-    const Union = Key.Union;
-    const TypePointer = Key.PtrType;
-
     const struct_packed_encoding = .{
         .summary = .@"{.payload.name%summary#\"}",
         .payload = TypeStructPacked,
@@ -5116,6 +5127,7 @@ pub const Tag = enum(u8) {
         .type_array_small = .{ .summary = .@"[{.payload.len%value}]{.payload.child%summary}", .payload = Vector },
         .type_vector = .{ .summary = .@"@Vector({.payload.len%value}, {.payload.child%summary})", .payload = Vector },
         .type_pointer = .{ .summary = .@"*... {.payload.child%summary}", .payload = TypePointer },
+        .type_restricted = .{ .summary = .@"@Restricted({.payload.ptr_type%summary})", .payload = TypeRestricted },
         .type_slice = .{ .summary = .@"[]... {.data.unwrapped.payload.child%summary}", .data = Index },
         .type_optional = .{ .summary = .@"?{.data%summary}", .data = Index },
         .type_anyframe = .{ .summary = .@"anyframe->{.data%summary}", .data = Index },
@@ -5362,6 +5374,25 @@ pub const Tag = enum(u8) {
     fn Payload(comptime tag: Tag) type {
         return @field(encodings, @tagName(tag)).payload;
     }
+
+    const ErrorUnionType = Key.ErrorUnionType;
+    const TypeValue = Key.TypeValue;
+    const Error = Key.Error;
+    const EnumTag = Key.EnumTag;
+    const Union = Key.Union;
+    const TypePointer = Key.PtrType;
+
+    const TypeRestricted = struct {
+        /// Index of the `reify_restricted` ZIR instruction.
+        zir_index: TrackedInst.Index,
+
+        // TODO: the non-fqn will be needed by the new dwarf structure
+        /// The name of this restricted type.
+        name: NullTerminatedString,
+
+        /// The pointer type this restricted type is based on.
+        unrestricted_ptr_type: Index,
+    };
 
     pub const Extern = struct {
         // name, is_const, alignment, addrspace come from `owner_nav`.
@@ -6455,6 +6486,14 @@ pub fn indexToKey(ip: *const InternPool, index: Index) Key {
             return .{ .ptr_type = ptr_info };
         },
 
+        .type_restricted => {
+            const restricted_ptr_info = extraData(unwrapped_index.getExtra(ip), Tag.TypeRestricted, data);
+            return .{ .restricted_ptr_type = .{
+                .zir_index = restricted_ptr_info.zir_index,
+                .unrestricted_ptr_type = restricted_ptr_info.unrestricted_ptr_type,
+            } };
+        },
+
         .type_optional => .{ .opt_type = @enumFromInt(data) },
         .type_anyframe => .{ .anyframe_type = @enumFromInt(data) },
 
@@ -7237,6 +7276,7 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
                 .data = try addExtra(extra, ptr_type_adjusted),
             });
         },
+        .restricted_ptr_type => unreachable, // instead getReifiedRestrictedType
         .array_type => |array_type| {
             assert(array_type.child != .none);
             assert(array_type.sentinel == .none or ip.typeOf(array_type.sentinel) == array_type.child);
@@ -7367,7 +7407,11 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
         },
 
         .ptr => |ptr| {
-            const ptr_type = ip.indexToKey(ptr.ty).ptr_type;
+            const ptr_type = switch (ip.indexToKey(ptr.ty)) {
+                .ptr_type => |ptr_type| ptr_type,
+                .restricted_ptr_type => |restricted_ptr_type| ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
+                else => unreachable,
+            };
             assert(ptr_type.flags.size != .slice);
             items.appendAssumeCapacity(switch (ptr.base_addr) {
                 .nav => |nav| .{
@@ -7958,6 +8002,65 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
     }
     return gop.put();
 }
+
+pub fn getReifiedRestrictedType(
+    ip: *InternPool,
+    gpa: Allocator,
+    io: Io,
+    tid: Zcu.PerThread.Id,
+    zir_index: TrackedInst.Index,
+    unrestricted_ptr_type: Index,
+) Allocator.Error!WipRestrictedType.Result {
+    var gop = try ip.getOrPutKey(gpa, io, tid, .{ .restricted_ptr_type = .{
+        .zir_index = zir_index,
+        .unrestricted_ptr_type = unrestricted_ptr_type,
+    } });
+    defer gop.deinit();
+    if (gop == .existing) return .{ .existing = gop.existing };
+
+    const local = ip.getLocal(tid);
+    const items = local.getMutableItems(gpa, io);
+    const extra = local.getMutableExtra(gpa, io);
+    try items.ensureUnusedCapacity(1);
+
+    try extra.ensureUnusedCapacity(@typeInfo(Tag.TypeRestricted).@"struct".fields.len);
+
+    const extra_index = addExtraAssumeCapacity(extra, Tag.TypeRestricted{
+        .zir_index = zir_index,
+        .name = undefined,
+        .unrestricted_ptr_type = unrestricted_ptr_type,
+    });
+    items.appendAssumeCapacity(.{
+        .tag = .type_restricted,
+        .data = extra_index,
+    });
+    return .{ .wip = .{
+        .index = gop.put(),
+        .tid = tid,
+        .type_name_index = extra_index + std.meta.fieldIndex(Tag.TypeRestricted, "name").?,
+    } };
+}
+
+pub const WipRestrictedType = struct {
+    index: Index,
+    tid: Zcu.PerThread.Id,
+    type_name_index: u32,
+
+    pub fn setName(wip: WipRestrictedType, ip: *InternPool, type_name: NullTerminatedString) void {
+        const extra = ip.getLocalShared(wip.tid).extra.acquire();
+        const extra_items = extra.view().items(.@"0");
+        extra_items[wip.type_name_index] = @intFromEnum(type_name);
+    }
+
+    pub fn cancel(wip: WipRestrictedType, ip: *InternPool, tid: Zcu.PerThread.Id) void {
+        ip.remove(tid, wip.index);
+    }
+
+    pub const Result = union(enum) {
+        wip: WipRestrictedType,
+        existing: Index,
+    };
+};
 
 pub fn getDeclaredStructType(
     ip: *InternPool,
@@ -9925,6 +10028,7 @@ test "basic usage" {
 pub fn childType(ip: *const InternPool, i: Index) Index {
     return switch (ip.indexToKey(i)) {
         .ptr_type => |ptr_type| ptr_type.child,
+        .restricted_ptr_type => |restricted_ptr_type| ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type.child,
         .vector_type => |vector_type| vector_type.child,
         .array_type => |array_type| array_type.child,
         .opt_type, .anyframe_type => |child| child,
@@ -10007,22 +10111,28 @@ pub fn getCoerced(
                 .val = .none,
             } });
 
-            if (ip.isPointerType(new_ty)) switch (ip.indexToKey(new_ty).ptr_type.flags.size) {
-                .one, .many, .c => return ip.get(gpa, io, tid, .{ .ptr = .{
-                    .ty = new_ty,
-                    .base_addr = .int,
-                    .byte_offset = 0,
-                } }),
-                .slice => return ip.get(gpa, io, tid, .{ .slice = .{
-                    .ty = new_ty,
-                    .ptr = try ip.get(gpa, io, tid, .{ .ptr = .{
-                        .ty = ip.slicePtrType(new_ty),
+            new_ty: switch (ip.indexToKey(new_ty)) {
+                .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
+                    .one, .many, .c => return ip.get(gpa, io, tid, .{ .ptr = .{
+                        .ty = new_ty,
                         .base_addr = .int,
                         .byte_offset = 0,
                     } }),
-                    .len = .undef_usize,
-                } }),
-            };
+                    .slice => return ip.get(gpa, io, tid, .{ .slice = .{
+                        .ty = new_ty,
+                        .ptr = try ip.get(gpa, io, tid, .{ .ptr = .{
+                            .ty = ip.slicePtrType(new_ty),
+                            .base_addr = .int,
+                            .byte_offset = 0,
+                        } }),
+                        .len = .undef_usize,
+                    } }),
+                },
+                .restricted_ptr_type => |restricted_ptr_type| continue :new_ty .{
+                    .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
+                },
+                else => {},
+            }
         },
         else => {
             const unwrapped_val = val.unwrap(ip);
@@ -10101,28 +10211,40 @@ pub fn getCoerced(
             },
             else => {},
         },
-        .slice => |slice| if (ip.isPointerType(new_ty) and ip.indexToKey(new_ty).ptr_type.flags.size == .slice)
-            return ip.get(gpa, io, tid, .{ .slice = .{
-                .ty = new_ty,
-                .ptr = try ip.getCoerced(gpa, io, tid, slice.ptr, ip.slicePtrType(new_ty)),
-                .len = slice.len,
-            } })
-        else if (ip.isIntegerType(new_ty))
-            return ip.getCoerced(gpa, io, tid, slice.ptr, new_ty),
-        .ptr => |ptr| if (ip.isPointerType(new_ty) and ip.indexToKey(new_ty).ptr_type.flags.size != .slice)
-            return ip.get(gpa, io, tid, .{ .ptr = .{
-                .ty = new_ty,
-                .base_addr = ptr.base_addr,
-                .byte_offset = ptr.byte_offset,
-            } })
-        else if (ip.isIntegerType(new_ty))
-            switch (ptr.base_addr) {
+        .slice => |slice| new_ty: switch (ip.indexToKey(new_ty)) {
+            .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
+                .one, .many, .c => {},
+                .slice => return ip.get(gpa, io, tid, .{ .slice = .{
+                    .ty = new_ty,
+                    .ptr = try ip.getCoerced(gpa, io, tid, slice.ptr, ip.slicePtrType(new_ty)),
+                    .len = slice.len,
+                } }),
+            },
+            .restricted_ptr_type => |restricted_ptr_type| continue :new_ty .{
+                .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
+            },
+            else => if (ip.isIntegerType(new_ty)) return ip.getCoerced(gpa, io, tid, slice.ptr, new_ty),
+        },
+        .ptr => |ptr| new_ty: switch (ip.indexToKey(new_ty)) {
+            .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
+                .one, .many, .c => return ip.get(gpa, io, tid, .{ .ptr = .{
+                    .ty = new_ty,
+                    .base_addr = ptr.base_addr,
+                    .byte_offset = ptr.byte_offset,
+                } }),
+                .slice => {},
+            },
+            .restricted_ptr_type => |restricted_ptr_type| continue :new_ty .{
+                .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
+            },
+            else => if (ip.isIntegerType(new_ty)) switch (ptr.base_addr) {
                 .int => return ip.get(gpa, io, tid, .{ .int = .{
                     .ty = .usize_type,
                     .storage = .{ .u64 = @intCast(ptr.byte_offset) },
                 } }),
                 else => {},
             },
+        },
         .opt => |opt| switch (ip.indexToKey(new_ty)) {
             .ptr_type => |ptr_type| return switch (opt.val) {
                 .none => switch (ptr_type.flags.size) {
@@ -10397,10 +10519,6 @@ pub fn isFunctionType(ip: *const InternPool, ty: Index) bool {
     return ip.indexToKey(ty) == .func_type;
 }
 
-pub fn isPointerType(ip: *const InternPool, ty: Index) bool {
-    return ip.indexToKey(ty) == .ptr_type;
-}
-
 pub fn isOptionalType(ip: *const InternPool, ty: Index) bool {
     return ip.indexToKey(ty) == .opt_type;
 }
@@ -10577,6 +10695,7 @@ fn dumpStatsFallible(ip: *const InternPool, w: *Io.Writer, arena: Allocator) !vo
                 .type_array_big => @sizeOf(Array),
                 .type_vector => @sizeOf(Vector),
                 .type_pointer => @sizeOf(Tag.TypePointer),
+                .type_restricted => @sizeOf(Tag.TypeRestricted),
                 .type_slice => 0,
                 .type_optional => 0,
                 .type_anyframe => 0,
@@ -10838,6 +10957,7 @@ fn dumpAllFallible(ip: *const InternPool, w: *Io.Writer) anyerror!void {
                 .type_array_big,
                 .type_vector,
                 .type_pointer,
+                .type_restricted,
                 .type_optional,
                 .type_anyframe,
                 .type_error_union,
@@ -11576,6 +11696,7 @@ pub fn typeOf(ip: *const InternPool, index: Index) Index {
                 .type_array_small,
                 .type_vector,
                 .type_pointer,
+                .type_restricted,
                 .type_slice,
                 .type_optional,
                 .type_anyframe,
@@ -11921,6 +12042,7 @@ pub fn zigTypeTag(ip: *const InternPool, index: Index) std.builtin.TypeId {
 
             .type_pointer,
             .type_slice,
+            .type_restricted,
             => .pointer,
 
             .type_optional => .optional,

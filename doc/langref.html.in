@@ -5769,6 +5769,13 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       <p>Returns a {#link|pointer|Pointers#} type with the properties specified by the arguments.</p>
       {#header_close#}
 
+      {#header_open|@Restricted#}
+      <pre>{#syntax#}@Restricted(
+    comptime Pointer: type,
+) type{#endsyntax#}</pre>
+      <p>Returns a restricted pointer type based on the specified pointer type.</p>
+      {#header_close#}
+
       {#header_open|@Fn#}
       <pre>{#syntax#}@Fn(
     comptime param_types: []const type,

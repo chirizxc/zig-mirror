@@ -84,6 +84,7 @@ fn ensureLayoutResolvedInner(sema: *Sema, ty: Type, orig_ty: Type, reason: *cons
     switch (ip.indexToKey(ty.toIntern())) {
         .int_type,
         .ptr_type,
+        .restricted_ptr_type,
         .anyframe_type,
         .simple_type,
         .opaque_type,

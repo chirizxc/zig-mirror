@@ -2062,6 +2062,10 @@ pub const Inst = struct {
         /// Implements builtin `@Pointer`.
         /// `operand` is payload index to `ReifyPointer`.
         reify_pointer,
+        /// Implements builtin `@Restricted`.
+        /// `operand` is payload index to `UnNode`.
+        /// `small` contains `NameStrategy`.
+        reify_restricted,
         /// Implements builtin `@Fn`.
         /// `operand` is payload index to `ReifyFn`.
         reify_fn,
@@ -4431,15 +4435,16 @@ fn findTrackableInner(
                 },
 
                 // Reifications need tracking.
-                .reify_enum,
+                .reify_restricted,
                 .reify_struct,
                 .reify_union,
+                .reify_enum,
                 => return contents.other.append(gpa, inst),
 
                 // Type declarations need tracking.
                 .struct_decl,
-                .union_decl,
                 .enum_decl,
+                .union_decl,
                 .opaque_decl,
                 => return contents.type_decls.append(gpa, inst),
             }
@@ -5232,9 +5237,10 @@ pub fn assertTrackable(zir: Zir, inst_idx: Zir.Inst.Index) void {
             .union_decl,
             .enum_decl,
             .opaque_decl,
-            .reify_enum,
+            .reify_restricted,
             .reify_struct,
             .reify_union,
+            .reify_enum,
             => {}, // tracked in order, as the owner instructions of explicit container types
             else => unreachable, // assertion failure; not trackable
         },

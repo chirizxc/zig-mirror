@@ -1614,6 +1614,10 @@ fn genBody(func: *Func, body: []const Air.Inst.Index) InnerError!void {
             .wrap_errunion_payload => try func.airWrapErrUnionPayload(inst),
             .wrap_errunion_err     => try func.airWrapErrUnionErr(inst),
 
+            .unwrap_restricted,
+            .unwrap_restricted_safe,
+            => return func.fail("TODO implement restricted pointers", .{}),
+
             .runtime_nav_ptr => try func.airRuntimeNavPtr(inst),
 
             .add_optimized,

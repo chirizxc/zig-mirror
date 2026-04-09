@@ -398,7 +398,7 @@ pub const Block = struct {
     /// The name of the current "context" for naming namespace types.
     /// The interpretation of this depends on the name strategy in ZIR, but the name
     /// is always incorporated into the type name somehow.
-    /// See `Sema.setTypeName`.
+    /// See `Sema.computeTypeName`.
     type_name_ctx: InternPool.NullTerminatedString,
 
     /// Create a `LazySrcLoc` based on an `Offset` from the code being analyzed in this block.
@@ -1435,6 +1435,7 @@ fn analyzeBodyInner(
                     .reify_pointer_sentinel_ty => try sema.zirReifyPointerSentinelTy(block, extended),
                     .reify_tuple               => try sema.zirReifyTuple(           block, extended),
                     .reify_pointer             => try sema.zirReifyPointer(         block, extended),
+                    .reify_restricted          => try sema.zirReifyRestricted(      block, extended, inst),
                     .reify_fn                  => try sema.zirReifyFn(              block, extended),
                     .reify_struct              => try sema.zirReifyStruct(          block, extended, inst),
                     .reify_union               => try sema.zirReifyUnion(           block, extended, inst),
@@ -18956,7 +18957,8 @@ fn structInitAnon(
         .existing => |ty| .fromInterned(ty),
         .wip => |wip| ty: {
             errdefer wip.cancel(ip, pt.tid);
-            try sema.setTypeName(block, &wip, .anon, "struct", inst);
+            const type_name, const name_nav = try sema.computeTypeName(block, wip.index, .anon, "struct", inst);
+            wip.setName(ip, type_name, name_nav);
 
             // Reified structs have field information populated immediately.
             @memcpy(wip.field_names.get(ip), names);
@@ -19879,6 +19881,62 @@ fn zirReifyPointer(
     }));
 }
 
+fn zirReifyRestricted(
+    sema: *Sema,
+    block: *Block,
+    extended: Zir.Inst.Extended.InstData,
+    inst: Zir.Inst.Index,
+) CompileError!Air.Inst.Ref {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const comp = zcu.comp;
+    const gpa = comp.gpa;
+    const io = comp.io;
+    const ip = &zcu.intern_pool;
+
+    const name_strategy: Zir.Inst.NameStrategy = @enumFromInt(extended.small);
+    const extra = sema.code.extraData(Zir.Inst.UnNode, extended.operand).data;
+    const tracked_inst = try block.trackZir(inst);
+
+    const src: LazySrcLoc = .{
+        .base_node_inst = tracked_inst,
+        .offset = .nodeOffset(.zero),
+    };
+    const ptr_type_src: LazySrcLoc = .{
+        .base_node_inst = tracked_inst,
+        .offset = .{ .node_offset_builtin_call_arg = .{
+            .builtin_call_node = extra.node,
+            .arg_index = 0,
+        } },
+    };
+
+    const operand = try sema.resolveType(block, src, extra.operand);
+    const unrestricted_ptr_type: Type = switch (ip.indexToKey(operand.toIntern())) {
+        else => return sema.fail(block, ptr_type_src, "expected pointer type, found '{f}'", .{operand.fmt(pt)}),
+        .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
+            .one, .many, .c => operand,
+            .slice => return sema.fail(block, ptr_type_src, "slice types cannot be restricted", .{}),
+        },
+        .restricted_ptr_type => |restricted_ptr_type| .fromInterned(restricted_ptr_type.unrestricted_ptr_type),
+    };
+
+    switch (try ip.getReifiedRestrictedType(gpa, io, pt.tid, tracked_inst, unrestricted_ptr_type.toIntern())) {
+        .existing => |ty| {
+            try sema.addTypeReferenceEntry(src, .fromInterned(ty));
+            // No need for `ensureNamespaceUpToDate` because this type doesn't have a namespace.
+            return .fromIntern(ty);
+        },
+        .wip => |wip| {
+            errdefer wip.cancel(ip, pt.tid);
+            const type_name, _ = try sema.computeTypeName(block, wip.index, name_strategy, "restricted", inst);
+            wip.setName(ip, type_name);
+            if (zcu.comp.debugIncremental()) try zcu.incremental_debug_state.newType(zcu, wip.index);
+            try sema.addTypeReferenceEntry(src, .fromInterned(wip.index));
+            return .fromIntern(wip.index);
+        },
+    }
+}
+
 fn zirReifyFn(
     sema: *Sema,
     block: *Block,
@@ -20194,7 +20252,8 @@ fn zirReifyStruct(
         },
         .wip => |wip| {
             errdefer wip.cancel(ip, pt.tid);
-            try sema.setTypeName(block, &wip, name_strategy, "struct", inst);
+            const type_name, const name_nav = try sema.computeTypeName(block, wip.index, name_strategy, "struct", inst);
+            wip.setName(ip, type_name, name_nav);
             for (0..fields_len) |field_idx| {
                 const field_name_val = try field_names_arr.elemValue(pt, field_idx);
                 const field_attrs_val = try field_attrs_arr.elemValue(pt, field_idx);
@@ -20438,7 +20497,8 @@ fn zirReifyUnion(
         },
         .wip => |wip| {
             errdefer wip.cancel(ip, pt.tid);
-            try sema.setTypeName(block, &wip, name_strategy, "union", inst);
+            const type_name, const name_nav = try sema.computeTypeName(block, wip.index, name_strategy, "union", inst);
+            wip.setName(ip, type_name, name_nav);
 
             for (0..fields_len) |field_idx| {
                 const field_name_val = try field_names_arr.elemValue(pt, field_idx);
@@ -20603,8 +20663,8 @@ fn zirReifyEnum(
         },
         .wip => |wip| {
             errdefer wip.cancel(ip, pt.tid);
-
-            try sema.setTypeName(block, &wip, name_strategy, "enum", inst);
+            const type_name, const name_nav = try sema.computeTypeName(block, wip.index, name_strategy, "enum", inst);
+            wip.setName(ip, type_name, name_nav);
 
             // Populate field names and values. Duplicate checking will be handled by type resolution.
             for (0..fields_len) |field_index| {
@@ -27736,6 +27796,22 @@ fn coerceExtra(
                     return sema.coerceCompatiblePtrs(block, dest_ty, slice_ptr, inst_src);
                 },
             }
+
+            // Restricted coercions
+            if (maybe_inst_val != null) {
+                if (dest_ty.unrestrictedType(zcu)) |dest_unrestricted_ty| {
+                    if (sema.resolveValue(try sema.coerceExtra(block, dest_unrestricted_ty, inst, inst_src, opts))) |inst_val| {
+                        return .fromIntern(try ip.getCoerced(gpa, io, pt.tid, inst_val.toIntern(), dest_ty.toIntern()));
+                    }
+                }
+            }
+            if (inst_ty.unrestrictedType(zcu)) |inst_unrestricted_ty| {
+                const inst_unrestricted: Air.Inst.Ref = if (maybe_inst_val) |inst_val|
+                    .fromIntern(try ip.getCoerced(gpa, io, pt.tid, inst_val.toIntern(), inst_unrestricted_ty.toIntern()))
+                else
+                    try sema.unwrapRestrictedPtr(block, inst_unrestricted_ty, inst, inst_src);
+                return sema.coerceExtra(block, dest_ty, inst_unrestricted, inst_src, opts);
+            }
         },
         .int, .comptime_int => switch (inst_ty.zigTypeTag(zcu)) {
             .float, .comptime_float => float: {
@@ -28084,6 +28160,7 @@ const InMemoryCoercionResult = union(enum) {
     ptr_alignment: AlignPair,
     double_ptr_to_anyopaque: Pair,
     slice_to_anyopaque: Pair,
+    ptr_restricted: Pair,
 
     const Pair = struct {
         actual: Type,
@@ -28415,6 +28492,15 @@ const InMemoryCoercionResult = union(enum) {
                 try sema.errNote(src, msg, "consider using '.ptr'", .{});
                 break;
             },
+            .ptr_restricted => |pair| {
+                for ([_]Type{ pair.actual, pair.wanted }) |restricted_ptr_type| {
+                    const unrestricted_ptr_type = restricted_ptr_type.unrestrictedType(pt.zcu) orelse continue;
+                    try sema.errNote(src, msg, "restricted type '{f}' is not guaranteed to have the same representation as its unrestricted type '{f}'", .{
+                        restricted_ptr_type.fmt(pt), unrestricted_ptr_type.fmt(pt),
+                    });
+                }
+                break;
+            },
         };
     }
 };
@@ -28479,7 +28565,7 @@ pub fn coerceInMemoryAllowed(
             (dest_info.signedness == .signed and src_info.signedness == .unsigned and dest_info.bits <= src_info.bits) or
             (dest_info.signedness == .unsigned and src_info.signedness == .signed))
         {
-            return InMemoryCoercionResult{ .int_not_coercible = .{
+            return .{ .int_not_coercible = .{
                 .actual_signedness = src_info.signedness,
                 .wanted_signedness = dest_info.signedness,
                 .actual_bits = src_info.bits,
@@ -28913,7 +28999,7 @@ fn coerceInMemoryAllowedPtrs(
     const ok_ptr_size = src_info.flags.size == dest_info.flags.size or
         src_info.flags.size == .c or dest_info.flags.size == .c;
     if (!ok_ptr_size) {
-        return InMemoryCoercionResult{ .ptr_size = .{
+        return .{ .ptr_size = .{
             .actual = src_info.flags.size,
             .wanted = dest_info.flags.size,
         } };
@@ -29049,12 +29135,18 @@ fn coerceInMemoryAllowedPtrs(
             break :a dest_child.abiAlignment(zcu);
         } else dest_info.flags.alignment;
         if (dest_align.compare(if (dest_is_mut) .neq else .gt, src_align)) {
-            return InMemoryCoercionResult{ .ptr_alignment = .{
+            return .{ .ptr_alignment = .{
                 .actual = src_align,
                 .wanted = dest_align,
             } };
         }
     }
+
+    // Restricted pointers have a different in-memory representation depending on the safety mode of the module that created it.
+    if (dest_ty.unrestrictedType(zcu) != null or src_ty.unrestrictedType(zcu) != null) return .{ .ptr_restricted = .{
+        .actual = src_ty,
+        .wanted = dest_ty,
+    } };
 
     return .ok;
 }
@@ -29202,10 +29294,15 @@ fn storePtr2(
 
     try sema.requireRuntimeBlock(block, src, runtime_src);
 
-    const store_inst = if (is_ret)
-        try block.addBinOp(.store, ptr, operand)
+    const unrestricted_ptr = if (ptr_ty.unrestrictedType(zcu)) |unrestricted_ptr_ty|
+        try sema.unwrapRestrictedPtr(block, unrestricted_ptr_ty, ptr, ptr_src)
     else
-        try block.addBinOp(air_tag, ptr, operand);
+        ptr;
+
+    const store_inst = if (is_ret)
+        try block.addBinOp(.store, unrestricted_ptr, operand)
+    else
+        try block.addBinOp(air_tag, unrestricted_ptr, operand);
 
     try sema.checkComptimeKnownStore(block, store_inst, operand_src);
 
@@ -30282,7 +30379,12 @@ fn analyzeLoad(
         break :msg msg;
     });
 
-    return block.addTyOp(.load, elem_ty, ptr);
+    const unrestricted_ptr = if (ptr_ty.unrestrictedType(zcu)) |unrestricted_ptr_ty|
+        try sema.unwrapRestrictedPtr(block, unrestricted_ptr_ty, ptr, ptr_src)
+    else
+        ptr;
+
+    return block.addTyOp(.load, elem_ty, unrestricted_ptr);
 }
 
 fn analyzeSlicePtr(
@@ -31492,6 +31594,19 @@ fn wrapErrorUnionSet(
     } else {
         return block.addTyOp(.wrap_errunion_err, dest_ty, coerced);
     }
+}
+
+fn unwrapRestrictedPtr(
+    sema: *Sema,
+    block: *Block,
+    unrestricted_ptr_ty: Type,
+    ptr: Air.Inst.Ref,
+    ptr_src: LazySrcLoc,
+) !Air.Inst.Ref {
+    return block.addTyOp(if (block.wantSafety()) tag: {
+        try sema.preparePanicId(ptr_src, .corrupt_restricted_pointer);
+        break :tag .unwrap_restricted_safe;
+    } else .unwrap_restricted, unrestricted_ptr_ty, ptr);
 }
 
 /// Returns the enum tag value for the active tag of a tagged union value.
@@ -34211,13 +34326,59 @@ pub fn analyzeMemoizedState(sema: *Sema, stage: InternPool.MemoizedStateStage) C
 fn getExpectedBuiltinFnType(sema: *Sema, decl: Zcu.BuiltinDecl) CompileError!Type {
     const pt = sema.pt;
     return switch (decl) {
+        .Signedness,
+        .AddressSpace,
+        .CallingConvention,
+        => unreachable,
         // `noinline fn () void`
         .returnError => try pt.funcType(.{
             .param_types = &.{},
             .return_type = .void_type,
             .is_noinline = true,
         }),
+        .StackTrace,
+        .SourceLocation,
+        .CallModifier,
+        .AtomicOrder,
+        .AtomicRmwOp,
+        .ReduceOp,
+        .FloatMode,
+        .PrefetchOptions,
+        .ExportOptions,
+        .ExternOptions,
+        .BranchHint,
+        => unreachable,
 
+        .Type,
+        .@"Type.Fn",
+        .@"Type.Fn.Param",
+        .@"Type.Fn.Param.Attributes",
+        .@"Type.Fn.Attributes",
+        .@"Type.Int",
+        .@"Type.Float",
+        .@"Type.Pointer",
+        .@"Type.Pointer.Size",
+        .@"Type.Pointer.Attributes",
+        .@"Type.Array",
+        .@"Type.Vector",
+        .@"Type.Optional",
+        .@"Type.Error",
+        .@"Type.ErrorUnion",
+        .@"Type.EnumField",
+        .@"Type.Enum",
+        .@"Type.Enum.Mode",
+        .@"Type.Union",
+        .@"Type.UnionField",
+        .@"Type.UnionField.Attributes",
+        .@"Type.Struct",
+        .@"Type.StructField",
+        .@"Type.StructField.Attributes",
+        .@"Type.ContainerLayout",
+        .@"Type.Opaque",
+        .@"Type.Declaration",
+        => unreachable,
+
+        .panic => unreachable,
         // `fn ([]const u8, ?usize) noreturn`
         .@"panic.call" => try pt.funcType(.{
             .param_types = &.{
@@ -34226,7 +34387,6 @@ fn getExpectedBuiltinFnType(sema: *Sema, decl: Zcu.BuiltinDecl) CompileError!Typ
             },
             .return_type = .noreturn_type,
         }),
-
         // `fn (anytype, anytype) noreturn`
         .@"panic.sentinelMismatch",
         .@"panic.inactiveUnionField",
@@ -34234,19 +34394,16 @@ fn getExpectedBuiltinFnType(sema: *Sema, decl: Zcu.BuiltinDecl) CompileError!Typ
             .param_types = &.{ .generic_poison_type, .generic_poison_type },
             .return_type = .noreturn_type,
         }),
-
         // `fn (anyerror) noreturn`
         .@"panic.unwrapError" => try pt.funcType(.{
             .param_types = &.{.anyerror_type},
             .return_type = .noreturn_type,
         }),
-
         // `fn (usize) noreturn`
         .@"panic.sliceCastLenRemainder" => try pt.funcType(.{
             .param_types = &.{.usize_type},
             .return_type = .noreturn_type,
         }),
-
         // `fn (usize, usize) noreturn`
         .@"panic.outOfBounds",
         .@"panic.startGreaterThanEnd",
@@ -34254,7 +34411,6 @@ fn getExpectedBuiltinFnType(sema: *Sema, decl: Zcu.BuiltinDecl) CompileError!Typ
             .param_types = &.{ .usize_type, .usize_type },
             .return_type = .noreturn_type,
         }),
-
         // `fn () noreturn`
         .@"panic.reachedUnreachable",
         .@"panic.unwrapNull",
@@ -34275,23 +34431,28 @@ fn getExpectedBuiltinFnType(sema: *Sema, decl: Zcu.BuiltinDecl) CompileError!Typ
         .@"panic.copyLenMismatch",
         .@"panic.memcpyAlias",
         .@"panic.noreturnReturned",
+        .@"panic.corruptRestrictedPointer",
         => try pt.funcType(.{
             .param_types = &.{},
             .return_type = .noreturn_type,
         }),
 
-        else => unreachable,
+        .VaList => unreachable,
+
+        .assembly,
+        .@"assembly.Clobbers",
+        => unreachable,
     };
 }
 
-pub fn setTypeName(
+pub fn computeTypeName(
     sema: *Sema,
     block: *Block,
-    wip: *const InternPool.WipContainerType,
+    index: InternPool.Index,
     name_strategy: Zir.Inst.NameStrategy,
     anon_prefix: []const u8,
     inst: Zir.Inst.Index,
-) CompileError!void {
+) CompileError!struct { InternPool.NullTerminatedString, InternPool.Nav.Index.Optional } {
     const pt = sema.pt;
     const zcu = pt.zcu;
     const comp = zcu.comp;
@@ -34308,16 +34469,16 @@ pub fn setTypeName(
             // TODO: that would be possible, by detecting line number changes and renaming
             // types appropriately. However, `@typeName` becomes a problem then. If we remove
             // that builtin from the language, we can consider this.
-            wip.setName(ip, try ip.getOrPutStringFmt(
+            return .{ try ip.getOrPutStringFmt(
                 gpa,
                 io,
                 pt.tid,
                 "{f}__{s}_{d}",
-                .{ block.type_name_ctx.fmt(ip), anon_prefix, @intFromEnum(wip.index) },
+                .{ block.type_name_ctx.fmt(ip), anon_prefix, @intFromEnum(index) },
                 .no_embedded_nulls,
-            ), .none);
+            ), .none };
         },
-        .parent => wip.setName(ip, block.type_name_ctx, sema.owner.unwrap().nav_val.toOptional()),
+        .parent => return .{ block.type_name_ctx, sema.owner.unwrap().nav_val.toOptional() },
         .func => {
             const fn_info = sema.code.getFnInfo(ip.funcZirBodyInst(sema.func_index).resolve(ip) orelse return error.AnalysisFail);
             const zir_tags = sema.code.instructions.items(.tag);
@@ -34360,8 +34521,7 @@ pub fn setTypeName(
             };
 
             w.writeByte(')') catch return error.OutOfMemory;
-            const name = try ip.getOrPutString(gpa, io, pt.tid, aw.written(), .no_embedded_nulls);
-            wip.setName(ip, name, .none);
+            return .{ try ip.getOrPutString(gpa, io, pt.tid, aw.written(), .no_embedded_nulls), .none };
         },
         .dbg_var => {
             // TODO: this logic is questionable. We ideally should be traversing the `Block` rather than relying on the order of AstGen instructions.
@@ -34376,10 +34536,9 @@ pub fn setTypeName(
             } else {
                 continue :strat .anon;
             };
-            const name = try ip.getOrPutStringFmt(gpa, io, pt.tid, "{f}.{s}", .{
+            return .{ try ip.getOrPutStringFmt(gpa, io, pt.tid, "{f}.{s}", .{
                 block.type_name_ctx.fmt(ip), var_name,
-            }, .no_embedded_nulls);
-            wip.setName(ip, name, .none);
+            }, .no_embedded_nulls), .none };
         },
     }
 }
@@ -34420,7 +34579,8 @@ fn zirStructDecl(
         .existing => |ty| .fromInterned(ty),
         .wip => |wip| ty: {
             errdefer wip.cancel(ip, pt.tid);
-            try sema.setTypeName(block, &wip, struct_decl.name_strategy, "struct", inst);
+            const type_name, const name_nav = try sema.computeTypeName(block, wip.index, struct_decl.name_strategy, "struct", inst);
+            wip.setName(ip, type_name, name_nav);
             const new_namespace_index: InternPool.NamespaceIndex = try pt.createNamespace(.{
                 .parent = block.namespace.toOptional(),
                 .owner_type = wip.index,
@@ -34493,7 +34653,8 @@ fn zirUnionDecl(
         .existing => |ty| .fromInterned(ty),
         .wip => |wip| ty: {
             errdefer wip.cancel(ip, pt.tid);
-            try sema.setTypeName(block, &wip, union_decl.name_strategy, "union", inst);
+            const type_name, const name_nav = try sema.computeTypeName(block, wip.index, union_decl.name_strategy, "union", inst);
+            wip.setName(ip, type_name, name_nav);
             const new_namespace_index: InternPool.NamespaceIndex = try pt.createNamespace(.{
                 .parent = block.namespace.toOptional(),
                 .owner_type = wip.index,
@@ -34545,7 +34706,8 @@ fn zirEnumDecl(
         .existing => |ty| .fromInterned(ty),
         .wip => |wip| ty: {
             errdefer wip.cancel(ip, pt.tid);
-            try sema.setTypeName(block, &wip, enum_decl.name_strategy, "enum", inst);
+            const type_name, const name_nav = try sema.computeTypeName(block, wip.index, enum_decl.name_strategy, "enum", inst);
+            wip.setName(ip, type_name, name_nav);
             const new_namespace_index: InternPool.NamespaceIndex = try pt.createNamespace(.{
                 .parent = block.namespace.toOptional(),
                 .owner_type = wip.index,
@@ -34594,7 +34756,8 @@ fn zirOpaqueDecl(
         .existing => |ty| .fromInterned(ty),
         .wip => |wip| ty: {
             errdefer wip.cancel(ip, pt.tid);
-            try sema.setTypeName(block, &wip, opaque_decl.name_strategy, "opaque", inst);
+            const type_name, const name_nav = try sema.computeTypeName(block, wip.index, opaque_decl.name_strategy, "opaque", inst);
+            wip.setName(ip, type_name, name_nav);
             const new_namespace_index: InternPool.NamespaceIndex = try pt.createNamespace(.{
                 .parent = block.namespace.toOptional(),
                 .owner_type = wip.index,
