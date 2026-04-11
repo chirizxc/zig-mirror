@@ -9320,15 +9320,6 @@ fn builtinCall(
             });
             return rvalue(gz, ri, result, node);
         },
-        .Restricted => {
-            const unrestricted_ptr_ty = try typeExpr(gz, scope, params[0]);
-            const result = try gz.addExtendedPayloadSmall(
-                .reify_restricted,
-                @intFromEnum(reify_name_strat),
-                Zir.Inst.UnNode{ .node = gz.nodeIndexToRelative(node), .operand = unrestricted_ptr_ty },
-            );
-            return rvalue(gz, ri, result, node);
-        },
         .Fn => {
             const fn_attrs_ty = try gz.addBuiltinValue(node, .fn_attributes);
             const param_types = try comptimeExpr(gz, scope, .{ .rl = .{ .coerced_ty = .slice_const_type_type } }, params[0], .fn_param_types);
@@ -9347,6 +9338,15 @@ fn builtinCall(
                 .ret_ty = ret_ty,
                 .fn_attrs = fn_attrs,
             });
+            return rvalue(gz, ri, result, node);
+        },
+        .Restricted => {
+            const unrestricted_ty = try typeExpr(gz, scope, params[0]);
+            const result = try gz.addExtendedPayloadSmall(
+                .reify_restricted,
+                @intFromEnum(reify_name_strat),
+                Zir.Inst.ReifyRestricted{ .node = node, .unrestricted_ty = unrestricted_ty },
+            );
             return rvalue(gz, ri, result, node);
         },
         .Struct => {

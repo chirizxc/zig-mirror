@@ -181,8 +181,9 @@ fn update(pool: *ConstPool, pt: Zcu.PerThread, user: User, index: ConstPool.Inde
     }
 }
 fn checkType(pool: *const ConstPool, ty: Type, zcu: *const Zcu) bool {
-    if (ty.isGenericPoison()) return true;
-    return switch (ty.zigTypeTag(zcu)) {
+    const unrestricted_ty = ty.unrestrictedType(zcu) orelse ty;
+    if (unrestricted_ty.isGenericPoison()) return true;
+    return switch (unrestricted_ty.zigTypeTag(zcu)) {
         .type,
         .void,
         .bool,
@@ -201,33 +202,34 @@ fn checkType(pool: *const ConstPool, ty: Type, zcu: *const Zcu) bool {
         .enum_literal,
         => true,
 
-        .array, .vector => pool.checkType(ty.childType(zcu), zcu),
-        .optional => pool.checkType(ty.optionalChild(zcu), zcu),
-        .error_union => pool.checkType(ty.errorUnionPayload(zcu), zcu),
+        .array, .vector => pool.checkType(unrestricted_ty.childType(zcu), zcu),
+        .optional => pool.checkType(unrestricted_ty.optionalChild(zcu), zcu),
+        .error_union => pool.checkType(unrestricted_ty.errorUnionPayload(zcu), zcu),
         .@"fn" => {
             const ip = &zcu.intern_pool;
-            const func = ip.indexToKey(ty.toIntern()).func_type;
+            const func = ip.indexToKey(unrestricted_ty.toIntern()).func_type;
             for (func.param_types.get(ip)) |param_ty_ip| {
                 if (!pool.checkType(.fromInterned(param_ty_ip), zcu)) return false;
             }
             return pool.checkType(.fromInterned(func.return_type), zcu);
         },
-        .@"struct" => if (ty.isTuple(zcu)) {
-            for (0..ty.structFieldCount(zcu)) |field_index| {
-                if (!pool.checkType(ty.fieldType(field_index, zcu), zcu)) return false;
+        .@"struct" => if (unrestricted_ty.isTuple(zcu)) {
+            for (0..unrestricted_ty.structFieldCount(zcu)) |field_index| {
+                if (!pool.checkType(unrestricted_ty.fieldType(field_index, zcu), zcu)) return false;
             }
             return true;
         } else {
-            return pool.complete_containers.contains(ty.toIntern());
+            return pool.complete_containers.contains(unrestricted_ty.toIntern());
         },
         .@"union", .@"enum" => {
-            return pool.complete_containers.contains(ty.toIntern());
+            return pool.complete_containers.contains(unrestricted_ty.toIntern());
         },
     };
 }
 fn registerTypeDeps(pool: *ConstPool, root: Index, ty: Type, zcu: *const Zcu) Allocator.Error!void {
-    if (ty.isGenericPoison()) return;
-    switch (ty.zigTypeTag(zcu)) {
+    const unrestricted_ty = ty.unrestrictedType(zcu) orelse ty;
+    if (unrestricted_ty.isGenericPoison()) return;
+    switch (unrestricted_ty.zigTypeTag(zcu)) {
         .type,
         .void,
         .bool,
@@ -246,20 +248,20 @@ fn registerTypeDeps(pool: *ConstPool, root: Index, ty: Type, zcu: *const Zcu) Al
         .enum_literal,
         => {},
 
-        .array, .vector => try pool.registerTypeDeps(root, ty.childType(zcu), zcu),
-        .optional => try pool.registerTypeDeps(root, ty.optionalChild(zcu), zcu),
-        .error_union => try pool.registerTypeDeps(root, ty.errorUnionPayload(zcu), zcu),
+        .array, .vector => try pool.registerTypeDeps(root, unrestricted_ty.childType(zcu), zcu),
+        .optional => try pool.registerTypeDeps(root, unrestricted_ty.optionalChild(zcu), zcu),
+        .error_union => try pool.registerTypeDeps(root, unrestricted_ty.errorUnionPayload(zcu), zcu),
         .@"fn" => {
             const ip = &zcu.intern_pool;
-            const func = ip.indexToKey(ty.toIntern()).func_type;
+            const func = ip.indexToKey(unrestricted_ty.toIntern()).func_type;
             for (func.param_types.get(ip)) |param_ty_ip| {
                 try pool.registerTypeDeps(root, .fromInterned(param_ty_ip), zcu);
             }
             try pool.registerTypeDeps(root, .fromInterned(func.return_type), zcu);
         },
-        .@"struct", .@"union", .@"enum" => if (ty.isTuple(zcu)) {
-            for (0..ty.structFieldCount(zcu)) |field_index| {
-                try pool.registerTypeDeps(root, ty.fieldType(field_index, zcu), zcu);
+        .@"struct", .@"union", .@"enum" => if (unrestricted_ty.isTuple(zcu)) {
+            for (0..unrestricted_ty.structFieldCount(zcu)) |field_index| {
+                try pool.registerTypeDeps(root, unrestricted_ty.fieldType(field_index, zcu), zcu);
             }
         } else {
             // `ty` is a container; register the dependency.
@@ -269,7 +271,7 @@ fn registerTypeDeps(pool: *ConstPool, root: Index, ty: Type, zcu: *const Zcu) Al
             try pool.container_dep_entries.ensureUnusedCapacity(gpa, 1);
             errdefer comptime unreachable;
 
-            const gop = pool.container_deps.getOrPutAssumeCapacity(ty.toIntern());
+            const gop = pool.container_deps.getOrPutAssumeCapacity(unrestricted_ty.toIntern());
             const entry: ContainerDepEntry.Index = @enumFromInt(pool.container_dep_entries.items.len);
             pool.container_dep_entries.appendAssumeCapacity(.{
                 .next = if (gop.found_existing) gop.value_ptr.toOptional() else .none,

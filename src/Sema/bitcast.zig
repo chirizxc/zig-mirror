@@ -239,13 +239,13 @@ const UnpackValueBits = struct {
         switch (ip.indexToKey(val.toIntern())) {
             .int_type,
             .ptr_type,
-            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,
             .anyframe_type,
             .error_union_type,
             .simple_type,
+            .restricted_type,
             .struct_type,
             .tuple_type,
             .union_type,
@@ -273,6 +273,8 @@ const UnpackValueBits = struct {
             => try unpack.primitive(val),
 
             .bitpack => |bitpack| try unpack.primitive(.fromInterned(bitpack.backing_int_val)),
+
+            .restricted_value => |restricted_value| try unpack.add(.fromInterned(restricted_value.unrestricted_value)),
 
             .aggregate => switch (ty.zigTypeTag(zcu)) {
                 .vector => {

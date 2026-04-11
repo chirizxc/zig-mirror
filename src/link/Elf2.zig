@@ -3349,7 +3349,14 @@ fn flushLazy(elf: *Elf, pt: Zcu.PerThread, lmr: Node.LazyMapRef) !void {
 
     if (structure.modify) |modification| modification.operation.apply(
         elf.lazySymbolIfExists(modification.lazy_sym).?.node(elf).slice(&elf.mf),
-        elf.targetEndian(),
+        .{
+            .ptr_bit_width = switch (elf.identClass()) {
+                .NONE, _ => unreachable,
+                .@"32" => 32,
+                .@"64" => 64,
+            },
+            .endian = elf.targetEndian(),
+        },
     );
 }
 

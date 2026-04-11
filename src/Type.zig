@@ -165,7 +165,6 @@ pub fn classify(start_ty: Type, zcu: *const Zcu) Class {
         .error_set_type,
         .inferred_error_set_type,
         .ptr_type,
-        .restricted_ptr_type,
         .anyframe_type,
         => .runtime,
 
@@ -199,6 +198,10 @@ pub fn classify(start_ty: Type, zcu: *const Zcu) Class {
                 .one, .many => .many,
             };
             cur_ty = .fromInterned(child_ty_ip);
+            continue;
+        },
+        .restricted_type => |restricted_type| {
+            cur_ty = .fromInterned(restricted_type.unrestricted_type);
             continue;
         },
         .tuple_type => |tuple| {
@@ -254,6 +257,7 @@ pub fn classify(start_ty: Type, zcu: *const Zcu) Class {
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,
@@ -374,28 +378,13 @@ pub fn arrayInfo(self: Type, zcu: *const Zcu) ArrayInfo {
 }
 
 pub fn ptrInfo(ty: Type, zcu: *const Zcu) InternPool.Key.PtrType {
-    return ty.ptrInfoOrNull(&zcu.intern_pool, .{}).?;
-}
-
-pub fn ptrInfoOrNull(ty: Type, ip: *const InternPool, comptime opts: struct {
-    allow_optional: bool = true,
-    allow_restricted: bool = true,
-}) ?InternPool.Key.PtrType {
-    return switch (ip.indexToKey(ty.toIntern())) {
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
         .ptr_type => |p| p,
-        .restricted_ptr_type => |rp| if (opts.allow_restricted)
-            ip.indexToKey(rp.unrestricted_ptr_type).ptr_type
-        else
-            null,
-        .opt_type => |child| if (opts.allow_optional) switch (ip.indexToKey(child)) {
+        .opt_type => |child| switch (zcu.intern_pool.indexToKey(child)) {
             .ptr_type => |p| p,
-            .restricted_ptr_type => |rp| if (opts.allow_restricted)
-                ip.indexToKey(rp.unrestricted_ptr_type).ptr_type
-            else
-                null,
-            else => null, // not a pointer type
-        } else null,
-        else => null, // not a pointer type
+            else => unreachable,
+        },
+        else => unreachable,
     };
 }
 
@@ -504,10 +493,6 @@ pub fn print(ty: Type, writer: *std.Io.Writer, pt: Zcu.PerThread, ctx: ?*Compari
             try print(Type.fromInterned(info.child), writer, pt, ctx);
             return;
         },
-        .restricted_ptr_type => {
-            const name = ip.loadRestrictedType(ty.toIntern()).name;
-            try writer.print("{f}", .{name.fmt(ip)});
-        },
         .array_type => |array_type| {
             if (array_type.sentinel == .none) {
                 try writer.print("[{d}]", .{array_type.len});
@@ -606,6 +591,10 @@ pub fn print(ty: Type, writer: *std.Io.Writer, pt: Zcu.PerThread, ctx: ?*Compari
             .enum_literal => try writer.writeAll("@EnumLiteral()"),
 
             .generic_poison => unreachable,
+        },
+        .restricted_type => {
+            const name = ip.loadRestrictedType(ty.toIntern()).name;
+            try writer.print("{f}", .{name.fmt(ip)});
         },
         .struct_type => {
             const name = ip.loadStructType(ty.toIntern()).name;
@@ -708,6 +697,7 @@ pub fn print(ty: Type, writer: *std.Io.Writer, pt: Zcu.PerThread, ctx: ?*Compari
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,
@@ -767,13 +757,13 @@ pub fn hasWellDefinedLayout(ty: Type, zcu: *const Zcu) bool {
         .vector_type,
         => true,
 
-        .restricted_ptr_type,
         .error_union_type,
         .error_set_type,
         .inferred_error_set_type,
         .tuple_type,
         .opaque_type,
         .anyframe_type,
+        .restricted_type,
         // These are function bodies, not function pointers.
         .func_type,
         => false,
@@ -847,6 +837,7 @@ pub fn hasWellDefinedLayout(ty: Type, zcu: *const Zcu) bool {
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,
@@ -898,10 +889,7 @@ pub fn fnHasRuntimeBits(fn_ty: Type, zcu: *const Zcu) bool {
 
 /// Like `hasRuntimeBits`, but also returns `true` for runtime functions.
 pub fn isRuntimeFnOrHasRuntimeBits(ty: Type, zcu: *const Zcu) bool {
-    switch (ty.zigTypeTag(zcu)) {
-        .@"fn" => return ty.fnHasRuntimeBits(zcu),
-        else => return ty.hasRuntimeBits(zcu),
-    }
+    return if (zcu.intern_pool.isFunctionType(ty.toIntern())) ty.fnHasRuntimeBits(zcu) else ty.hasRuntimeBits(zcu);
 }
 
 /// Returns whether `ty` is NPV, meaning it is "like `noreturn`" in a sense. See doc comments on
@@ -914,13 +902,22 @@ pub fn isNoReturn(ty: Type, zcu: *const Zcu) bool {
 
 /// Never returns `none`. Asserts that all necessary type resolution is already done.
 pub fn ptrAlignment(ptr_ty: Type, zcu: *Zcu) Alignment {
-    const ptr_key = ptr_ty.ptrInfo(zcu);
+    const ip = &zcu.intern_pool;
+    const ptr_key: InternPool.Key.PtrType = switch (ip.indexToKey(ptr_ty.toIntern())) {
+        .ptr_type => |key| key,
+        .opt_type => |child| ip.indexToKey(child).ptr_type,
+        else => unreachable,
+    };
     if (ptr_key.flags.alignment != .none) return ptr_key.flags.alignment;
     return Type.fromInterned(ptr_key.child).abiAlignment(zcu);
 }
 
 pub fn ptrAddressSpace(ty: Type, zcu: *const Zcu) std.builtin.AddressSpace {
-    return ty.ptrInfo(zcu).flags.address_space;
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
+        .ptr_type => |ptr_type| ptr_type.flags.address_space,
+        .opt_type => |child| zcu.intern_pool.indexToKey(child).ptr_type.flags.address_space,
+        else => unreachable,
+    };
 }
 
 /// Never returns `.none`. Asserts that the layout of `ty` is resolved.
@@ -936,7 +933,7 @@ pub fn abiAlignment(ty: Type, zcu: *const Zcu) Alignment {
             if (int_type.bits == 0) return .@"1";
             return .fromByteUnits(std.zig.target.intAlignment(target, int_type.bits));
         },
-        .ptr_type, .restricted_ptr_type, .anyframe_type => ptrAbiAlignment(target),
+        .ptr_type, .anyframe_type => ptrAbiAlignment(target),
         .array_type => |array_type| Type.fromInterned(array_type.child).abiAlignment(zcu),
         .vector_type => |vector_type| {
             if (vector_type.len == 0) return .@"1";
@@ -1020,6 +1017,10 @@ pub fn abiAlignment(ty: Type, zcu: *const Zcu) Alignment {
 
             .generic_poison => unreachable,
         },
+        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+            .indirect => ptrAbiAlignment(target),
+            .direct => return abiAlignment(.fromInterned(restricted_type.unrestricted_type), zcu),
+        },
         .tuple_type => |tuple| {
             var big_align: Alignment = .@"1";
             for (tuple.types.get(ip), tuple.values.get(ip)) |field_ty, val| {
@@ -1069,6 +1070,7 @@ pub fn abiAlignment(ty: Type, zcu: *const Zcu) Alignment {
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,
@@ -1090,7 +1092,7 @@ pub fn abiSize(ty: Type, zcu: *const Zcu) u64 {
             .slice => ptrAbiSize(target) * 2,
             .one, .many, .c => ptrAbiSize(target),
         },
-        .restricted_ptr_type, .anyframe_type => ptrAbiSize(target),
+        .anyframe_type => ptrAbiSize(target),
         .array_type => |arr| arr.lenIncludingSentinel() * Type.fromInterned(arr.child).abiSize(zcu),
         .vector_type => |vec| {
             const elem_ty: Type = .fromInterned(vec.child);
@@ -1169,6 +1171,10 @@ pub fn abiSize(ty: Type, zcu: *const Zcu) u64 {
             .anyopaque => unreachable,
             .generic_poison => unreachable,
         },
+        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+            .indirect => ptrAbiSize(target),
+            .direct => return abiSize(.fromInterned(restricted_type.unrestricted_type), zcu),
+        },
         .tuple_type => |tuple| switch (ty.classify(zcu)) {
             // `structFieldOffset` is bogus on NPV tuples, because there may be some fields with
             // non-zero size.
@@ -1209,6 +1215,7 @@ pub fn abiSize(ty: Type, zcu: *const Zcu) u64 {
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,
@@ -1243,7 +1250,7 @@ pub fn bitSize(ty: Type, zcu: *const Zcu) u64 {
             .slice => target.ptrBitWidth() * 2,
             else => target.ptrBitWidth(),
         },
-        .restricted_ptr_type, .anyframe_type => target.ptrBitWidth(),
+        .anyframe_type => target.ptrBitWidth(),
         .array_type => |array_type| {
             const elem_ty: Type = .fromInterned(array_type.child);
             const len = array_type.lenIncludingSentinel();
@@ -1294,6 +1301,10 @@ pub fn bitSize(ty: Type, zcu: *const Zcu) u64 {
             .generic_poison => unreachable,
         },
 
+        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+            .indirect => target.ptrBitWidth(),
+            .direct => return bitSize(.fromInterned(restricted_type.unrestricted_type), zcu),
+        },
         .struct_type => {
             const struct_obj = ip.loadStructType(ty.toIntern());
             switch (struct_obj.layout) {
@@ -1335,29 +1346,27 @@ pub fn bitSize(ty: Type, zcu: *const Zcu) u64 {
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,
     };
 }
 
-/// Returns `null` if `ty` is not a restricted pointer.
+/// Returns `null` if `ty` is not a restricted type.
 pub fn unrestrictedType(ty: Type, zcu: *const Zcu) ?Type {
     const ip = &zcu.intern_pool;
     return switch (ip.indexToKey(ty.toIntern())) {
-        .restricted_ptr_type => |restricted_ptr_type| return .fromInterned(restricted_ptr_type.unrestricted_ptr_type),
+        .restricted_type => |restricted_type| return .fromInterned(restricted_type.unrestricted_type),
         else => null,
     };
 }
 
 const RestrictedRepr = enum { indirect, direct };
 pub fn restrictedRepr(ty: Type, zcu: *const Zcu) RestrictedRepr {
-    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
-        .restricted_ptr_type => |restricted_ptr_type| restrictedReprByZirIndex(restricted_ptr_type.zir_index, zcu),
-        else => .direct,
-    };
+    return restrictedReprByTrackedInst(zcu.intern_pool.indexToKey(ty.toIntern()).restricted_type.zir_index, zcu);
 }
-pub fn restrictedReprByZirIndex(zir_index: InternPool.TrackedInst.Index, zcu: *const Zcu) RestrictedRepr {
+pub fn restrictedReprByTrackedInst(zir_index: InternPool.TrackedInst.Index, zcu: *const Zcu) RestrictedRepr {
     return switch (zcu.fileByIndex(zir_index.resolveFile(&zcu.intern_pool)).mod.?.optimize_mode) {
         .Debug, .ReleaseSafe => if (zcu.backendSupportsFeature(.restricted_types)) .indirect else .direct,
         .ReleaseFast, .ReleaseSmall => .direct,
@@ -1365,8 +1374,10 @@ pub fn restrictedReprByZirIndex(zir_index: InternPool.TrackedInst.Index, zcu: *c
 }
 
 pub fn isSinglePointer(ty: Type, zcu: *const Zcu) bool {
-    const ptr_info = ty.ptrInfoOrNull(&zcu.intern_pool, .{ .allow_optional = false }) orelse return false;
-    return ptr_info.flags.size == .one;
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
+        .ptr_type => |ptr_info| ptr_info.flags.size == .one,
+        else => false,
+    };
 }
 
 /// Asserts `ty` is a pointer.
@@ -1376,27 +1387,24 @@ pub fn ptrSize(ty: Type, zcu: *const Zcu) std.builtin.Type.Pointer.Size {
 
 /// Returns `null` if `ty` is not a pointer.
 pub fn ptrSizeOrNull(ty: Type, zcu: *const Zcu) ?std.builtin.Type.Pointer.Size {
-    const ptr_info = ty.ptrInfoOrNull(&zcu.intern_pool, .{ .allow_optional = false }) orelse return null;
-    return ptr_info.flags.size;
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
+        .ptr_type => |ptr_info| ptr_info.flags.size,
+        else => null,
+    };
 }
 
 pub fn isSlice(ty: Type, zcu: *const Zcu) bool {
-    const ptr_info = ty.ptrInfoOrNull(&zcu.intern_pool, .{ .allow_optional = false }) orelse return false;
-    return ptr_info.flags.size == .slice;
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
+        .ptr_type => |ptr_type| ptr_type.flags.size == .slice,
+        else => false,
+    };
 }
 
 pub fn isSliceAtRuntime(ty: Type, zcu: *const Zcu) bool {
-    const ip = &zcu.intern_pool;
-    return ty: switch (ip.indexToKey(ty.toIntern())) {
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
         .ptr_type => |ptr_type| ptr_type.flags.size == .slice,
-        .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-            .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
-        },
-        .opt_type => |child| opt_child: switch (zcu.intern_pool.indexToKey(child)) {
+        .opt_type => |child| switch (zcu.intern_pool.indexToKey(child)) {
             .ptr_type => |ptr_type| !ptr_type.flags.is_allowzero and ptr_type.flags.size == .slice,
-            .restricted_ptr_type => |restricted_ptr_type| continue :opt_child .{
-                .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
-            },
             else => false,
         },
         else => false,
@@ -1408,8 +1416,10 @@ pub fn slicePtrFieldType(ty: Type, zcu: *const Zcu) Type {
 }
 
 pub fn isConstPtr(ty: Type, zcu: *const Zcu) bool {
-    const ptr_info = ty.ptrInfoOrNull(&zcu.intern_pool, .{ .allow_optional = false }) orelse return false;
-    return ptr_info.flags.is_const;
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
+        .ptr_type => |ptr_type| ptr_type.flags.is_const,
+        else => false,
+    };
 }
 
 pub fn isVolatilePtr(ty: Type, zcu: *const Zcu) bool {
@@ -1417,25 +1427,25 @@ pub fn isVolatilePtr(ty: Type, zcu: *const Zcu) bool {
 }
 
 pub fn isVolatilePtrIp(ty: Type, ip: *const InternPool) bool {
-    const ptr_info = ty.ptrInfoOrNull(ip, .{ .allow_optional = false }) orelse return false;
-    return ptr_info.flags.is_volatile;
+    return switch (ip.indexToKey(ty.toIntern())) {
+        .ptr_type => |ptr_type| ptr_type.flags.is_volatile,
+        else => false,
+    };
 }
 
 pub fn isAllowzeroPtr(ty: Type, zcu: *const Zcu) bool {
-    const ip = &zcu.intern_pool;
-    return ty: switch (ip.indexToKey(ty.toIntern())) {
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
         .ptr_type => |ptr_type| ptr_type.flags.is_allowzero,
-        .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-            .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
-        },
         .opt_type => true,
         else => false,
     };
 }
 
 pub fn isCPtr(ty: Type, zcu: *const Zcu) bool {
-    const ptr_info = ty.ptrInfoOrNull(&zcu.intern_pool, .{ .allow_optional = false }) orelse return false;
-    return ptr_info.flags.size == .c;
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
+        .ptr_type => |ptr_type| ptr_type.flags.size == .c,
+        else => false,
+    };
 }
 
 pub fn isPtrAtRuntime(ty: Type, zcu: *const Zcu) bool {
@@ -1445,16 +1455,18 @@ pub fn isPtrAtRuntime(ty: Type, zcu: *const Zcu) bool {
             .slice => false,
             .one, .many, .c => true,
         },
-        .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-            .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
+        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+            .indirect => true,
+            .direct => continue :ty ip.indexToKey(restricted_type.unrestricted_type),
         },
         .opt_type => |child| opt_child: switch (ip.indexToKey(child)) {
             .ptr_type => |p| switch (p.flags.size) {
                 .slice, .c => false,
                 .many, .one => !p.flags.is_allowzero,
             },
-            .restricted_ptr_type => |restricted_ptr_type| continue :opt_child .{
-                .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
+            .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+                .indirect => true,
+                .direct => continue :opt_child ip.indexToKey(restricted_type.unrestricted_type),
             },
             else => false,
         },
@@ -1473,16 +1485,18 @@ pub fn optionalReprIsPayload(ty: Type, zcu: *const Zcu) bool {
     const ip = &zcu.intern_pool;
     return ty: switch (ip.indexToKey(ty.toIntern())) {
         .ptr_type => |ptr_type| ptr_type.flags.size == .c,
-        .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-            .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
-        },
-        .opt_type => |child_type| child_type == .anyerror_type or opt_child: switch (ip.indexToKey(child_type)) {
+        .opt_type => |opt_child_type| opt_child_type == .anyerror_type or opt_child: switch (ip.indexToKey(opt_child_type)) {
             .ptr_type => |ptr_type| ptr_type.flags.size != .c and !ptr_type.flags.is_allowzero,
-            .restricted_ptr_type => |restricted_ptr_type| continue :opt_child .{
-                .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
-            },
             .error_set_type, .inferred_error_set_type => true,
+            .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+                .indirect => true,
+                .direct => continue :opt_child ip.indexToKey(restricted_type.unrestricted_type),
+            },
             else => false,
+        },
+        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+            .indirect => false,
+            .direct => continue :ty ip.indexToKey(restricted_type.unrestricted_type),
         },
         else => false,
     };
@@ -1494,18 +1508,20 @@ pub fn isPtrLikeOptional(ty: Type, zcu: *const Zcu) bool {
     const ip = &zcu.intern_pool;
     return ty: switch (ip.indexToKey(ty.toIntern())) {
         .ptr_type => |ptr_type| ptr_type.flags.size == .c,
-        .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-            .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
-        },
-        .opt_type => |child| opt_child: switch (ip.indexToKey(child)) {
+        .opt_type => |opt_child_type| opt_child: switch (ip.indexToKey(opt_child_type)) {
             .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
                 .slice, .c => false,
                 .many, .one => !ptr_type.flags.is_allowzero,
             },
-            .restricted_ptr_type => |restricted_ptr_type| continue :opt_child .{
-                .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
+            .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+                .indirect => true,
+                .direct => continue :opt_child ip.indexToKey(restricted_type.unrestricted_type),
             },
             else => false,
+        },
+        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
+            .indirect => false,
+            .direct => continue :ty ip.indexToKey(restricted_type.unrestricted_type),
         },
         else => false,
     };
@@ -1541,7 +1557,7 @@ pub fn nullablePtrElem(ty: Type, zcu: *const Zcu) Type {
         .pointer => return ty.childType(zcu),
         .optional => {
             const ptr_ty = ty.childType(zcu);
-            const ptr_info = ptr_ty.ptrInfoOrNull(&zcu.intern_pool, .{ .allow_optional = false }).?;
+            const ptr_info = zcu.intern_pool.indexToKey(ptr_ty.toIntern()).ptr_type;
             assert(ptr_info.flags.size != .c);
             assert(!ptr_info.flags.is_allowzero);
             return .fromInterned(ptr_info.child);
@@ -1563,7 +1579,7 @@ pub fn nullablePtrElem(ty: Type, zcu: *const Zcu) Type {
 /// * `[*c]T`
 pub fn indexableElem(ty: Type, zcu: *const Zcu) Type {
     const ip = &zcu.intern_pool;
-    return ty: switch (ip.indexToKey(ty.toIntern())) {
+    return switch (ip.indexToKey(ty.toIntern())) {
         inline .array_type, .vector_type => |arr| .fromInterned(arr.child),
         .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
             .many, .slice, .c => .fromInterned(ptr_type.child),
@@ -1571,9 +1587,6 @@ pub fn indexableElem(ty: Type, zcu: *const Zcu) Type {
                 inline .array_type, .vector_type => |arr| .fromInterned(arr.child),
                 else => unreachable,
             },
-        },
-        .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-            .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
         },
         else => unreachable,
     };
@@ -1590,15 +1603,11 @@ pub fn scalarType(ty: Type, zcu: *const Zcu) Type {
 /// Asserts that the type is an optional, or a C pointer.
 /// For C pointers this returns the type unmodified.
 pub fn optionalChild(ty: Type, zcu: *const Zcu) Type {
-    const ip = &zcu.intern_pool;
-    ty: switch (ip.indexToKey(ty.toIntern())) {
+    switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
         .opt_type => |child| return .fromInterned(child),
         .ptr_type => |ptr_type| {
             assert(ptr_type.flags.size == .c);
             return ty;
-        },
-        .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-            .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
         },
         else => unreachable,
     }
@@ -1699,6 +1708,15 @@ pub fn containerLayout(ty: Type, zcu: *const Zcu) std.builtin.Type.ContainerLayo
     };
 }
 
+pub fn isBitpack(ty: Type, zcu: *const Zcu) bool {
+    const ip = &zcu.intern_pool;
+    return switch (ip.indexToKey(ty.toIntern())) {
+        .struct_type => ip.loadStructType(ty.toIntern()).layout == .@"packed",
+        .union_type => ip.loadUnionType(ty.toIntern()).layout == .@"packed",
+        else => false,
+    };
+}
+
 pub fn bitpackBackingInt(ty: Type, zcu: *const Zcu) Type {
     const ip = &zcu.intern_pool;
     return switch (ip.indexToKey(ty.toIntern())) {
@@ -1728,7 +1746,7 @@ pub fn errorSetIsEmpty(ty: Type, zcu: *const Zcu) bool {
     const ip = &zcu.intern_pool;
     return switch (ty.toIntern()) {
         .anyerror_type, .adhoc_inferred_error_set_type => false,
-        else => switch (ip.indexToKey(ty.toIntern())) {
+        else => |index| switch (ip.indexToKey(index)) {
             .error_set_type => |error_set_type| error_set_type.names.len == 0,
             .inferred_error_set_type => |i| switch (ip.funcIesResolvedUnordered(i)) {
                 .none, .anyerror_type => false,
@@ -1752,7 +1770,7 @@ pub fn isAnyError(ty: Type, zcu: *const Zcu) bool {
     return switch (ty.toIntern()) {
         .anyerror_type => true,
         .adhoc_inferred_error_set_type => false,
-        else => switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
+        else => |index| switch (zcu.intern_pool.indexToKey(index)) {
             .inferred_error_set_type => |i| ip.funcIesResolvedUnordered(i) == .anyerror_type,
             else => false,
         },
@@ -1760,9 +1778,13 @@ pub fn isAnyError(ty: Type, zcu: *const Zcu) bool {
 }
 
 pub fn isError(ty: Type, zcu: *const Zcu) bool {
-    return switch (ty.zigTypeTag(zcu)) {
-        .error_union, .error_set => true,
+    return switch (ty.toIntern()) {
+        .anyerror_type, .adhoc_inferred_error_set_type, .anyerror_void_error_union_type => true,
         else => false,
+        _ => |index| switch (zcu.intern_pool.indexToKey(index)) {
+            .error_union_type, .error_set_type => true,
+            else => false,
+        },
     };
 }
 
@@ -1782,7 +1804,7 @@ pub fn errorSetHasField(
     const ip = &zcu.intern_pool;
     return switch (ty.toIntern()) {
         .anyerror_type => true,
-        else => switch (ip.indexToKey(ty.toIntern())) {
+        else => |index| switch (ip.indexToKey(index)) {
             .error_set_type => |error_set_type| error_set_type.nameIndex(ip, name) != null,
             .inferred_error_set_type => |i| switch (ip.funcIesResolvedUnordered(i)) {
                 .anyerror_type => true,
@@ -1817,8 +1839,7 @@ pub fn vectorLen(ty: Type, zcu: *const Zcu) u32 {
 
 /// Asserts the type is an array, pointer or vector.
 pub fn sentinel(ty: Type, zcu: *const Zcu) ?Value {
-    const ip = &zcu.intern_pool;
-    return ty: switch (ip.indexToKey(ty.toIntern())) {
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
         .vector_type,
         .struct_type,
         .tuple_type,
@@ -1826,9 +1847,6 @@ pub fn sentinel(ty: Type, zcu: *const Zcu) ?Value {
 
         .array_type => |t| if (t.sentinel != .none) Value.fromInterned(t.sentinel) else null,
         .ptr_type => |t| if (t.sentinel != .none) Value.fromInterned(t.sentinel) else null,
-        .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-            .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
-        },
 
         else => unreachable,
     };
@@ -1867,10 +1885,27 @@ pub fn isUnsignedInt(ty: Type, zcu: *const Zcu) bool {
 /// Returns true for integers, enums, error sets, and packed structs/unions.
 /// If this function returns true, then intInfo() can be called on the type.
 pub fn isAbiInt(ty: Type, zcu: *const Zcu) bool {
-    return switch (ty.zigTypeTag(zcu)) {
-        .int, .@"enum", .error_set => true,
-        .@"struct", .@"union" => ty.containerLayout(zcu) == .@"packed",
-        else => false,
+    const ip = &zcu.intern_pool;
+    return switch (ty.toIntern()) {
+        .usize_type,
+        .isize_type,
+        .c_char_type,
+        .c_short_type,
+        .c_ushort_type,
+        .c_int_type,
+        .c_uint_type,
+        .c_long_type,
+        .c_ulong_type,
+        .c_longlong_type,
+        .c_ulonglong_type,
+        .anyerror_type,
+        => true,
+        else => switch (ip.indexToKey(ty.toIntern())) {
+            .int_type, .enum_type, .error_set_type => true,
+            .struct_type => ip.loadStructType(ty.toIntern()).layout == .@"packed",
+            .union_type => ip.loadUnionType(ty.toIntern()).layout == .@"packed",
+            else => false,
+        },
     };
 }
 
@@ -1914,10 +1949,10 @@ pub fn intInfo(starting_ty: Type, zcu: *const Zcu) InternPool.Key.IntType {
                 return .{ .signedness = .unsigned, .bits = zcu.errorSetBits() };
             },
 
+            .restricted_type => unreachable,
             .tuple_type => unreachable,
 
             .ptr_type => unreachable,
-            .restricted_ptr_type => unreachable,
             .anyframe_type => unreachable,
             .array_type => unreachable,
 
@@ -1945,6 +1980,7 @@ pub fn intInfo(starting_ty: Type, zcu: *const Zcu) InternPool.Key.IntType {
             .aggregate,
             .un,
             .bitpack,
+            .restricted_value,
             // memoization, not types
             .memoized_call,
             => unreachable,
@@ -2070,7 +2106,6 @@ pub fn isNumeric(ty: Type, zcu: *const Zcu) bool {
         .c_longlong_type,
         .c_ulonglong_type,
         => true,
-
         else => switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
             .int_type => true,
             else => false,
@@ -2088,7 +2123,6 @@ pub fn onePossibleValue(ty: Type, pt: Zcu.PerThread) !?Value {
     assertHasLayout(ty, zcu);
     return switch (ip.indexToKey(ty.toIntern())) {
         .ptr_type,
-        .restricted_ptr_type, // number of possible values is not known until the end of compilation, so never treated as NPV/OPV
         .error_union_type,
         .func_type,
         .anyframe_type,
@@ -2152,6 +2186,13 @@ pub fn onePossibleValue(ty: Type, pt: Zcu.PerThread) !?Value {
             .no_possible_value => try pt.nullValue(ty),
             else => null,
         },
+        .restricted_type => |restricted_type| if (try onePossibleValue(
+            .fromInterned(restricted_type.unrestricted_type),
+            pt,
+        )) |unrestricted_opv| .fromInterned(try pt.intern(.{ .restricted_value = .{
+            .ty = ty.toIntern(),
+            .unrestricted_value = unrestricted_opv.toIntern(),
+        } })) else null,
         .tuple_type => |tuple| {
             // Check *whether* the OPV exists first, because constructing it is a little more expensive.
             if (ty.classify(zcu) != .one_possible_value) return null;
@@ -2240,6 +2281,7 @@ pub fn onePossibleValue(ty: Type, pt: Zcu.PerThread) !?Value {
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,
@@ -2249,7 +2291,8 @@ pub fn onePossibleValue(ty: Type, pt: Zcu.PerThread) !?Value {
 /// Asserts that `ty` has its layout resolved. `generic_poison` will return `false`.
 pub fn comptimeOnly(ty: Type, zcu: *const Zcu) bool {
     if (ty.toIntern() == .generic_poison_type) return false;
-    if (ty.zigTypeTag(zcu) == .error_union and ty.errorUnionPayload(zcu).toIntern() == .generic_poison_type) return false;
+    const ip = &zcu.intern_pool;
+    if (ip.isErrorUnionType(ty.toIntern()) and ip.errorUnionPayload(ty.toIntern()) == .generic_poison_type) return false;
     return switch (ty.classify(zcu)) {
         .no_possible_value, .one_possible_value, .runtime => false,
         .partially_comptime, .fully_comptime => true,
@@ -2257,7 +2300,7 @@ pub fn comptimeOnly(ty: Type, zcu: *const Zcu) bool {
 }
 
 pub fn isVector(ty: Type, zcu: *const Zcu) bool {
-    return ty.zigTypeTag(zcu) == .vector;
+    return zcu.intern_pool.isVectorType(ty.toIntern());
 }
 
 /// Returns 0 if not a vector, otherwise returns @bitSizeOf(Element) * vector_len.
@@ -2673,7 +2716,7 @@ pub fn srcLocOrNull(ty: Type, zcu: *Zcu) ?Zcu.LazySrcLoc {
     const ip = &zcu.intern_pool;
     return .{
         .base_node_inst = switch (ip.indexToKey(ty.toIntern())) {
-            .restricted_ptr_type => |restricted_ptr_type| restricted_ptr_type.zir_index,
+            .restricted_type => |restricted_type| restricted_type.zir_index,
             .struct_type, .union_type, .opaque_type, .enum_type => |info| switch (info) {
                 .declared => |d| d.zir_index,
                 .reified => |r| r.zir_index,
@@ -2898,7 +2941,7 @@ pub fn getUnionLayout(loaded_union: InternPool.LoadedUnionType, zcu: *const Zcu)
 pub fn elemPtrType(ptr_ty: Type, index: ?u64, pt: Zcu.PerThread) Allocator.Error!Type {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    const ptr_info = ptr_ty.ptrInfoOrNull(ip, .{ .allow_optional = false }).?;
+    const ptr_info = ip.indexToKey(ptr_ty.toIntern()).ptr_type;
     const elem_ty: Type = switch (ptr_info.flags.size) {
         .slice, .many, .c => .fromInterned(ptr_info.child),
         .one => switch (ip.indexToKey(ptr_info.child)) {
@@ -2952,7 +2995,7 @@ pub fn elemPtrType(ptr_ty: Type, index: ?u64, pt: Zcu.PerThread) Allocator.Error
 pub fn fieldPtrType(ptr_ty: Type, field_index: u32, pt: Zcu.PerThread) Allocator.Error!Type {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    const ptr_info = ptr_ty.ptrInfoOrNull(ip, .{ .allow_optional = false }).?;
+    const ptr_info = ip.indexToKey(ptr_ty.toIntern()).ptr_type;
     assert(ptr_info.flags.size == .one or ptr_info.flags.size == .c);
     const aggregate_ty: Type = .fromInterned(ptr_info.child);
     aggregate_ty.assertHasLayout(zcu);
@@ -3080,7 +3123,7 @@ pub fn fieldPtrType(ptr_ty: Type, field_index: u32, pt: Zcu.PerThread) Allocator
             .none => switch (ip.indexToKey(aggregate_ty.toIntern())) {
                 .tuple_type, .union_type => field_ty.abiAlignment(zcu),
                 .struct_type => field_ty.defaultStructFieldAlignment(.auto, zcu),
-                .ptr_type, .restricted_ptr_type => ptrAbiAlignment(zcu.getTarget()),
+                .ptr_type => ptrAbiAlignment(zcu.getTarget()),
                 else => unreachable,
             },
             else => |a| a,
@@ -3109,7 +3152,7 @@ pub fn fieldPtrType(ptr_ty: Type, field_index: u32, pt: Zcu.PerThread) Allocator
 
 pub fn containerTypeName(ty: Type, ip: *const InternPool) InternPool.NullTerminatedString {
     return switch (ip.indexToKey(ty.toIntern())) {
-        .restricted_ptr_type => ip.loadRestrictedType(ty.toIntern()).name,
+        .restricted_type => ip.loadRestrictedType(ty.toIntern()).name,
         .struct_type => ip.loadStructType(ty.toIntern()).name,
         .union_type => ip.loadUnionType(ty.toIntern()).name,
         .enum_type => ip.loadEnumType(ty.toIntern()).name,
@@ -3317,7 +3360,6 @@ pub fn assertHasLayout(ty: Type, zcu: *const Zcu) void {
     switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
         .int_type,
         .ptr_type,
-        .restricted_ptr_type,
         .anyframe_type,
         .simple_type,
         .opaque_type,
@@ -3337,6 +3379,7 @@ pub fn assertHasLayout(ty: Type, zcu: *const Zcu) void {
         .tuple_type => |tuple| for (tuple.types.get(&zcu.intern_pool)) |field_ty| {
             assertHasLayout(.fromInterned(field_ty), zcu);
         },
+        .restricted_type => |restricted_type| assertHasLayout(.fromInterned(restricted_type.unrestricted_type), zcu),
         .struct_type => {
             assert(zcu.intern_pool.loadStructType(ty.toIntern()).want_layout);
             zcu.assertUpToDate(.wrap(.{ .type_layout = ty.toIntern() }));
@@ -3351,6 +3394,7 @@ pub fn assertHasLayout(ty: Type, zcu: *const Zcu) void {
         },
 
         // values, not types
+        .undef,
         .simple_value,
         .@"extern",
         .func,
@@ -3366,7 +3410,7 @@ pub fn assertHasLayout(ty: Type, zcu: *const Zcu) void {
         .aggregate,
         .un,
         .bitpack,
-        .undef,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,
@@ -3419,13 +3463,13 @@ fn collectSubtypes(ty: Type, pt: Zcu.PerThread, visited: *std.AutoArrayHashMapUn
         .undef,
         .inferred_error_set_type,
         .error_set_type,
+        .restricted_type,
         .struct_type,
         .union_type,
         .opaque_type,
         .enum_type,
         .simple_type,
         .int_type,
-        .restricted_ptr_type,
         => {},
 
         // values, not types
@@ -3444,6 +3488,7 @@ fn collectSubtypes(ty: Type, pt: Zcu.PerThread, visited: *std.AutoArrayHashMapUn
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,

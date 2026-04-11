@@ -239,7 +239,20 @@ pub const CType = union(enum) {
     ) Allocator.Error!CType {
         const gpa = zcu.comp.gpa;
         const ip = &zcu.intern_pool;
-        var cur_ty = start_ty;
+        var cur_ty: Type = if (start_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (start_ty.restrictedRepr(zcu)) {
+            .indirect => {
+                const unrestricted_cty = try lowerInner(unrestricted_ty, true, deps, arena, zcu);
+                const unrestricted_cty_buf = try arena.create(CType);
+                unrestricted_cty_buf.* = unrestricted_cty;
+                return .{ .pointer = .{
+                    .@"const" = true,
+                    .@"volatile" = false,
+                    .elem_ty = unrestricted_cty_buf,
+                    .nonstring = unrestricted_cty.isStringElem(),
+                } };
+            },
+            .direct => unrestricted_ty,
+        } else start_ty;
         while (true) {
             switch (cur_ty.zigTypeTag(zcu)) {
                 .type,
@@ -284,20 +297,6 @@ pub const CType = union(enum) {
 
                 .pointer => {
                     const ptr = cur_ty.ptrInfo(zcu);
-                    if (cur_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (cur_ty.restrictedRepr(zcu)) {
-                        .indirect => {
-                            const unrestricted_cty = try lowerInner(unrestricted_ty, true, deps, arena, zcu);
-                            const unrestricted_cty_buf = try arena.create(CType);
-                            unrestricted_cty_buf.* = unrestricted_cty;
-                            return .{ .pointer = .{
-                                .@"const" = true,
-                                .@"volatile" = false,
-                                .elem_ty = unrestricted_cty_buf,
-                                .nonstring = false,
-                            } };
-                        },
-                        .direct => {},
-                    };
                     switch (ptr.flags.size) {
                         .slice => {
                             try deps.addType(gpa, cur_ty, allow_incomplete);
@@ -305,7 +304,7 @@ pub const CType = union(enum) {
                         },
                         .one, .many, .c => {
                             const elem_ty: Type = .fromInterned(ptr.child);
-                            const is_fn_ptr = elem_ty.zigTypeTag(zcu) == .@"fn";
+                            const is_fn_ptr = ip.isFunctionType(elem_ty.toIntern());
                             const elem_cty: CType = elem_cty: {
                                 if (ptr.packed_offset.host_size > 0 and ptr.flags.vector_index == .none) {
                                     switch (classifyBitInt(.unsigned, ptr.packed_offset.host_size * 8, zcu)) {
@@ -876,6 +875,10 @@ pub const CType = union(enum) {
             const ty = ctx.ty;
             const zcu = ctx.zcu;
             const ip = &zcu.intern_pool;
+            if (ip.isRestrictedType(ty.toIntern())) {
+                const name = ip.loadRestrictedType(ty.toIntern()).name.toSlice(ip);
+                return w.print("{f}", .{@import("../c.zig").fmtIdentUnsolo(name)});
+            }
             switch (ty.zigTypeTag(zcu)) {
                 .frame => unreachable,
                 .@"anyframe" => unreachable,
@@ -926,10 +929,7 @@ pub const CType = union(enum) {
                 .optional => try w.print("opt_{f}", .{fmtZigType(ty.optionalChild(zcu), zcu)}),
                 .error_union => try w.print("errunion_{f}", .{fmtZigType(ty.errorUnionPayload(zcu), zcu)}),
 
-                .pointer => if (ty.unrestrictedType(zcu)) |_| {
-                    const name = ty.containerTypeName(ip).toSlice(ip);
-                    try w.print("{f}", .{@import("../c.zig").fmtIdentUnsolo(name)});
-                } else switch (ty.ptrSize(zcu)) {
+                .pointer => switch (ty.ptrSize(zcu)) {
                     .one, .many, .c => try w.print("ptr_{f}", .{fmtZigType(ty.childType(zcu), zcu)}),
                     .slice => try w.print("slice_{f}", .{fmtZigType(ty.childType(zcu), zcu)}),
                 },
@@ -971,6 +971,10 @@ pub const CType = union(enum) {
                     fmtZigType(ty.childType(zcu), zcu),
                 }),
 
+                .@"enum" => {
+                    const name = ip.loadEnumType(ty.toIntern()).name.toSlice(ip);
+                    try w.print("{f}", .{@import("../c.zig").fmtIdentUnsolo(name)});
+                },
                 .@"struct" => if (ty.isTuple(zcu)) {
                     const len = ty.structFieldCount(zcu);
                     try w.print("tuple_{d}", .{len});
@@ -979,17 +983,17 @@ pub const CType = union(enum) {
                         try w.print("_{f}", .{fmtZigType(field_ty, zcu)});
                     }
                 } else {
-                    const name = ty.containerTypeName(ip).toSlice(ip);
+                    const name = ip.loadStructType(ty.toIntern()).name.toSlice(ip);
                     try w.print("{f}", .{@import("../c.zig").fmtIdentUnsolo(name)});
                 },
                 .@"opaque" => if (ty.toIntern() == .anyopaque_type) {
                     try w.writeAll("anyopaque");
                 } else {
-                    const name = ty.containerTypeName(ip).toSlice(ip);
+                    const name = ip.loadOpaqueType(ty.toIntern()).name.toSlice(ip);
                     try w.print("{f}", .{@import("../c.zig").fmtIdentUnsolo(name)});
                 },
-                .@"union", .@"enum" => {
-                    const name = ty.containerTypeName(ip).toSlice(ip);
+                .@"union" => {
+                    const name = ip.loadUnionType(ty.toIntern()).name.toSlice(ip);
                     try w.print("{f}", .{@import("../c.zig").fmtIdentUnsolo(name)});
                 },
             }
@@ -1002,7 +1006,6 @@ pub const CType = union(enum) {
         return switch (ip.indexToKey(ty.toIntern())) {
             .int_type,
             .ptr_type,
-            .restricted_ptr_type,
             .anyframe_type,
             .simple_type,
             .opaque_type,
@@ -1010,6 +1013,7 @@ pub const CType = union(enum) {
             .inferred_error_set_type,
             => true,
 
+            .restricted_type,
             .struct_type,
             .union_type,
             .enum_type,
@@ -1045,6 +1049,7 @@ pub const CType = union(enum) {
             .aggregate,
             .un,
             .bitpack,
+            .restricted_value,
             // memoization, not types
             .memoized_call,
             => unreachable,

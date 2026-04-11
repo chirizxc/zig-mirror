@@ -501,7 +501,7 @@ pub const BuiltinDecl = enum {
     @"panic.copyLenMismatch",
     @"panic.memcpyAlias",
     @"panic.noreturnReturned",
-    @"panic.corruptRestrictedPointer",
+    @"panic.corruptRestrictedValue",
 
     VaList,
 
@@ -589,7 +589,7 @@ pub const BuiltinDecl = enum {
             .@"panic.copyLenMismatch",
             .@"panic.memcpyAlias",
             .@"panic.noreturnReturned",
-            .@"panic.corruptRestrictedPointer",
+            .@"panic.corruptRestrictedValue",
             => .func,
         };
     }
@@ -663,7 +663,7 @@ pub const SimplePanicId = enum {
     copy_len_mismatch,
     memcpy_alias,
     noreturn_returned,
-    corrupt_restricted_pointer,
+    corrupt_restricted_value,
 
     pub fn toBuiltin(id: SimplePanicId) BuiltinDecl {
         return switch (id) {
@@ -687,7 +687,7 @@ pub const SimplePanicId = enum {
             .copy_len_mismatch          => .@"panic.copyLenMismatch",
             .memcpy_alias               => .@"panic.memcpyAlias",
             .noreturn_returned          => .@"panic.noreturnReturned",
-            .corrupt_restricted_pointer => .@"panic.corruptRestrictedPointer",
+            .corrupt_restricted_value   => .@"panic.corruptRestrictedValue",
             // zig fmt: on
         };
     }
@@ -2748,12 +2748,13 @@ pub const LazySrcLoc = struct {
             .struct_init_anon => zir.extraData(Zir.Inst.StructInitAnon, inst.data.pl_node.payload_index).data.abs_node,
             .extended => switch (inst.data.extended.opcode) {
                 .struct_decl => zir.getStructDecl(zir_inst).src_node,
-                .union_decl => zir.getUnionDecl(zir_inst).src_node,
                 .enum_decl => zir.getEnumDecl(zir_inst).src_node,
+                .union_decl => zir.getUnionDecl(zir_inst).src_node,
                 .opaque_decl => zir.getOpaqueDecl(zir_inst).src_node,
-                .reify_enum => zir.extraData(Zir.Inst.ReifyEnum, inst.data.extended.operand).data.node,
+                .reify_restricted => zir.extraData(Zir.Inst.ReifyRestricted, inst.data.extended.operand).data.node,
                 .reify_struct => zir.extraData(Zir.Inst.ReifyStruct, inst.data.extended.operand).data.node,
                 .reify_union => zir.extraData(Zir.Inst.ReifyUnion, inst.data.extended.operand).data.node,
+                .reify_enum => zir.extraData(Zir.Inst.ReifyEnum, inst.data.extended.operand).data.node,
                 else => unreachable,
             },
             else => unreachable,
@@ -4000,7 +4001,7 @@ pub const Feature = enum {
 
 pub fn backendSupportsFeature(zcu: *const Zcu, comptime feature: Feature) bool {
     const backend = target_util.zigBackend(&zcu.root_mod.resolved_target.result, zcu.comp.config.use_llvm);
-    return target_util.backendSupportsFeature(backend, feature);
+    return target_util.backendSupportsFeature(backend, zcu.comp.config.incremental, feature);
 }
 
 pub const AtomicPtrAlignmentError = error{

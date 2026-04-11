@@ -1176,7 +1176,7 @@ pub const Loc = union(enum) {
     implicit_pointer: struct {
         unit: Unit.Index,
         entry: Entry.Index,
-        offset: i65,
+        offset: i65 = 0,
     },
     wasm_ext: union(enum) {
         local: u32,
@@ -3060,13 +3060,13 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
     } = switch (ip.indexToKey(nav_val.toIntern())) {
         .int_type,
         .ptr_type,
-        .restricted_ptr_type,
         .array_type,
         .vector_type,
         .opt_type,
         .error_union_type,
         .anyframe_type,
         .simple_type,
+        .restricted_type,
         .tuple_type,
         .func_type,
         .error_set_type,
@@ -3128,6 +3128,7 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         => if (nav.resolved.?.@"const") .@"const" else .@"var",
 
         .@"extern" => unreachable,
@@ -3509,12 +3510,15 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
 
     if (value_index == .anyerror_type) return; // handled in `flush` instead
 
-    const value_ip_key = ip.indexToKey(value_index);
-    switch (value_ip_key) {
+    const value_ip_key: InternPool.Key = switch (ip.indexToKey(value_index)) {
         .func => return, // populated by the Nav instead (`updateComptimeNav` or `initWipNav`)
         .@"extern" => return, // populated by the Nav instead (`initWipNav`)
-        else => {},
-    }
+        .restricted_value => |restricted_value| switch (Type.restrictedRepr(.fromInterned(restricted_value.ty), zcu)) {
+            .indirect => .{ .restricted_value = restricted_value },
+            .direct => ip.indexToKey(restricted_value.unrestricted_value),
+        },
+        else => |key| key,
+    };
 
     switch (value_index) {
         .generic_poison_type => log.debug("updateValue(anytype)", .{}),
@@ -3567,7 +3571,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
 
     const diw = &wip_nav.debug_info.writer;
     var big_int_space: Value.BigIntSpace = undefined;
-    key: switch (value_ip_key) {
+    switch (value_ip_key) {
         .func => unreachable, // handled above
         .@"extern" => unreachable, // handled above
 
@@ -3629,13 +3633,6 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                 try diw.writeUleb128(len_field_type.abiAlignment(zcu).forward(ptr_field_type.abiSize(zcu)));
                 try diw.writeUleb128(@intFromEnum(AbbrevCode.null));
             },
-        },
-        .restricted_ptr_type => |restricted_ptr_type| switch (Type.restrictedReprByZirIndex(restricted_ptr_type.zir_index, zcu)) {
-            .indirect => continue :key .{ .ptr_type = .{
-                .child = restricted_ptr_type.unrestricted_ptr_type,
-                .flags = .{ .is_const = true },
-            } },
-            .direct => continue :key .{ .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type },
         },
         .array_type => |array_type| {
             const array_child_type: Type = .fromInterned(array_type.child);
@@ -3846,6 +3843,28 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
             },
             .anyerror => unreachable, // already did early return above
             .adhoc_inferred_error_set => unreachable,
+        },
+        .restricted_type => |restricted_type| {
+            const repr = Type.restrictedReprByTrackedInst(restricted_type.zir_index, zcu);
+            try wip_nav.abbrevCode(switch (repr) {
+                .indirect => .ptr_type,
+                .direct => .alias_type,
+            });
+            try wip_nav.strpFmt("{f}", .{val.toType().fmt(pt)});
+            switch (repr) {
+                .indirect => {
+                    try diw.writeByte(@intFromEnum(InternPool.Key.PtrType.AddressSpace.generic));
+                    try wip_nav.infoSectionOffset(
+                        .debug_info,
+                        wip_nav.unit,
+                        wip_nav.entry,
+                        @intCast(diw.end + dwarf.sectionOffsetBytes()),
+                    );
+                    try wip_nav.abbrevCode(.is_const);
+                },
+                .direct => {},
+            }
+            try wip_nav.refType(.fromInterned(restricted_type.unrestricted_type));
         },
         .tuple_type => |tuple_type| if (tuple_type.types.len == 0) {
             try wip_nav.abbrevCode(.generated_empty_struct_type);
@@ -4265,7 +4284,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
             if (error_set_type.names.len > 0) try diw.writeUleb128(@intFromEnum(AbbrevCode.null));
         },
         .inferred_error_set_type => |func| {
-            try wip_nav.abbrevCode(.inferred_error_set_type);
+            try wip_nav.abbrevCode(.alias_type);
             try wip_nav.strpFmt("{f}", .{val.toType().fmt(pt)});
             try wip_nav.refType(.fromInterned(switch (ip.funcIesResolvedUnordered(func)) {
                 .none => .anyerror_type,
@@ -4647,6 +4666,15 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                     try wip_nav.blockValue(src_loc, .fromInterned(un.val));
             }
             try diw.writeUleb128(@intFromEnum(AbbrevCode.null));
+        },
+        .restricted_value => |restricted_value| { // repr checked above
+            try wip_nav.abbrevCode(.location_comptime_value);
+            const unrestricted_unit, const unrestricted_entry =
+                try wip_nav.getValueEntry(.fromInterned(restricted_value.unrestricted_value));
+            try wip_nav.infoExprLoc(.{ .implicit_pointer = .{
+                .unit = unrestricted_unit,
+                .entry = unrestricted_entry,
+            } });
         },
         .memoized_call => unreachable, // not a value
     }
@@ -5209,7 +5237,7 @@ const AbbrevCode = enum {
     tagged_union_default_field,
     void_type,
     numeric_type,
-    inferred_error_set_type,
+    alias_type,
     ptr_type,
     ptr_sentinel_type,
     ptr_aligned_type,
@@ -5839,7 +5867,7 @@ const AbbrevCode = enum {
                 .{ .alignment, .udata },
             },
         },
-        .inferred_error_set_type = .{
+        .alias_type = .{
             .tag = .typedef,
             .attrs = &.{
                 .{ .name, .strp },

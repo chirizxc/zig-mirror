@@ -2173,7 +2173,14 @@ fn flushLazy(coff: *Coff, pt: Zcu.PerThread, lmr: Node.LazyMapRef) !void {
 
     if (structure.modify) |modification| modification.operation.apply(
         coff.lazySymbolIfExists(modification.lazy_sym).?.node(coff).slice(&coff.mf),
-        coff.targetEndian(),
+        .{
+            .ptr_bit_width = switch (coff.optionalHeaderStandardPtr().magic) {
+                else => unreachable,
+                .PE32 => 32,
+                .@"PE32+" => 64,
+            },
+            .endian = coff.targetEndian(),
+        },
     );
 }
 

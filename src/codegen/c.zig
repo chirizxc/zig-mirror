@@ -767,7 +767,7 @@ pub const DeclGen = struct {
         // somewhere and we should let the C compiler tell us about it.
         const elem_ty = ptr_ty.childType(zcu);
         const need_cast = elem_ty.toIntern() != nav_ty.toIntern() and
-            elem_ty.zigTypeTag(zcu) != .@"fn" or nav_ty.zigTypeTag(zcu) != .@"fn";
+            !ip.isFunctionType(elem_ty.toIntern()) or !ip.isFunctionType(nav_ty.toIntern());
         if (need_cast) {
             try w.writeAll("((");
             try dg.renderType(w, ptr_ty);
@@ -919,13 +919,13 @@ pub const DeclGen = struct {
             // types, not values
             .int_type,
             .ptr_type,
-            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,
             .anyframe_type,
             .error_union_type,
             .simple_type,
+            .restricted_type,
             .struct_type,
             .tuple_type,
             .union_type,
@@ -1078,24 +1078,11 @@ pub const DeclGen = struct {
                 try dg.renderValue(w, .fromInterned(slice.len), initializer_type);
                 try w.writeByte('}');
             },
-            .ptr => switch (ty.restrictedRepr(zcu)) {
-                .indirect => {
-                    try dg.need_restricted.ensureUnusedCapacity(zcu.gpa, 2);
-                    dg.need_restricted.putAssumeCapacity(ty.toIntern(), {});
-                    dg.need_restricted.putAssumeCapacity(val.toIntern(), {});
-
-                    const restricted_ty_name = ty.containerTypeName(ip).toSlice(ip);
-                    try w.print("&zig_restricted_{f}__{d}[zig_restricted_index_{f}__{d}]", .{
-                        fmtIdentUnsolo(restricted_ty_name), ty.toIntern(),
-                        fmtIdentUnsolo(restricted_ty_name), val.toIntern(),
-                    });
-                },
-                .direct => {
-                    const derivation = try val.pointerDerivation(dg.arena, pt, null);
-                    try w.writeByte('(');
-                    try dg.renderPointer(w, derivation, location);
-                    try w.writeByte(')');
-                },
+            .ptr => {
+                const derivation = try val.pointerDerivation(dg.arena, pt, null);
+                try w.writeByte('(');
+                try dg.renderPointer(w, derivation, location);
+                try w.writeByte(')');
             },
             .opt => |opt| switch (CType.classifyOptional(ty, zcu)) {
                 .npv_payload => unreachable, // opv optional
@@ -1319,13 +1306,28 @@ pub const DeclGen = struct {
                     if (loaded_union.layout == .auto) try w.writeByte('}');
                 }
             },
+            .restricted_value => |restricted_value| switch (ty.restrictedRepr(zcu)) {
+                .indirect => {
+                    const loaded_restricted = ip.loadRestrictedType(ty.toIntern());
+                    // Explicitly add the restricted decl dependency on the unrestricted type
+                    _ = try CType.lower(.fromInterned(loaded_restricted.unrestricted_type), &dg.ctype_deps, dg.arena, zcu);
+                    try dg.need_restricted.put(zcu.gpa, val.toIntern(), {});
+
+                    const restricted_ty_name = loaded_restricted.name.toSlice(ip);
+                    try w.print("&zig_restricted_{f}__{d}[zig_restricted_index_{f}__{d}]", .{
+                        fmtIdentUnsolo(restricted_ty_name), ty.toIntern(),
+                        fmtIdentUnsolo(restricted_ty_name), val.toIntern(),
+                    });
+                },
+                .direct => try dg.renderValue(w, .fromInterned(restricted_value.unrestricted_value), initializer_type),
+            },
         }
     }
 
     fn renderUndefValue(
         dg: *DeclGen,
         w: *Writer,
-        ty: Type,
+        start_ty: Type,
         location: ValueRenderLocation,
     ) Error!void {
         const pt = dg.pt;
@@ -1343,7 +1345,8 @@ pub const DeclGen = struct {
             .ReleaseFast, .ReleaseSmall => false,
         };
 
-        switch (ty.toIntern()) {
+        var ty = start_ty;
+        ty: switch (start_ty.toIntern()) {
             .c_longdouble_type,
             .f16_type,
             .f32_type,
@@ -1371,7 +1374,7 @@ pub const DeclGen = struct {
                 return w.writeByte(')');
             },
             .bool_type => try w.writeAll(if (safety_on) "0xaa" else "false"),
-            else => ty: switch (ip.indexToKey(ty.toIntern())) {
+            else => ty_key: switch (ip.indexToKey(ty.toIntern())) {
                 .simple_type, // anyerror, c_char (etc), usize, isize
                 .int_type,
                 .enum_type,
@@ -1442,9 +1445,6 @@ pub const DeclGen = struct {
                         try w.writeByte('}');
                     },
                 },
-                .restricted_ptr_type => |restricted_ptr_type| continue :ty .{
-                    .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
-                },
                 .opt_type => |child_type| switch (CType.classifyOptional(ty, zcu)) {
                     .npv_payload => unreachable, // opv optional
 
@@ -1473,6 +1473,16 @@ pub const DeclGen = struct {
                         try w.writeAll(", .payload = ");
                         try dg.renderUndefValue(w, .fromInterned(child_type), initializer_type);
                         try w.writeAll(" }");
+                    },
+                },
+                .restricted_type => |restricted_type| switch (ty.restrictedRepr(zcu)) {
+                    .indirect => continue :ty_key .{ .ptr_type = .{
+                        .child = restricted_type.unrestricted_type,
+                        .flags = .{ .is_const = true },
+                    } },
+                    .direct => {
+                        ty = .fromInterned(restricted_type.unrestricted_type);
+                        continue :ty restricted_type.unrestricted_type;
                     },
                 },
                 .struct_type => {
@@ -1628,6 +1638,7 @@ pub const DeclGen = struct {
                 .aggregate,
                 .un,
                 .bitpack,
+                .restricted_value,
                 .memoized_call,
                 => unreachable, // values, not types
             },
@@ -2106,9 +2117,9 @@ pub fn genRestricted(
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     for (need_restricted.keys(), need_restricted.values()) |restricted_ty, *restricted_vals| {
-        const unrestricted_ptr_type = ip.indexToKey(restricted_ty).restricted_ptr_type.unrestricted_ptr_type;
-        const unrestricted_cty: CType = try .lower(.fromInterned(unrestricted_ptr_type), &dg.ctype_deps, dg.arena, zcu);
-        const restricted_ty_name = Type.fromInterned(restricted_ty).containerTypeName(ip).toSlice(ip);
+        const unrestricted_type = ip.indexToKey(restricted_ty).restricted_type.unrestricted_type;
+        const unrestricted_cty: CType = try .lower(.fromInterned(unrestricted_type), &dg.ctype_deps, dg.arena, zcu);
+        const restricted_ty_name = ip.loadRestrictedType(restricted_ty).name.toSlice(ip);
         try w.print(
             \\#define zig_restricted_len_{f}__{d} {d}u
             \\static {f}const zig_restricted_{f}__{d}[zig_restricted_len_{f}__{d}]{f} = {{
@@ -2138,7 +2149,7 @@ pub fn genRestricted(
                 restricted_val,
             });
             try dg.renderValue(w, .fromInterned(
-                try ip.getCoerced(zcu.gpa, zcu.comp.io, pt.tid, restricted_val, unrestricted_ptr_type),
+                ip.indexToKey(restricted_val).restricted_value.unrestricted_value,
             ), .static_initializer);
             try w.writeAll(",\n");
         }
@@ -3194,21 +3205,15 @@ fn airAlloc(f: *Function, inst: Air.Inst.Index) !CValue {
     log.debug("%{d}: allocated unfreeable t{d}", .{ inst, local.new_local });
     try f.allocs.put(zcu.gpa, local.new_local, true);
 
-    switch (elem_ty.zigTypeTag(zcu)) {
-        .@"struct", .@"union" => switch (elem_ty.containerLayout(zcu)) {
-            .@"packed" => {
-                // For packed aggregates, we zero-initialize to try and work around a design flaw
-                // related to how `packed`, `undefined`, and RLS interact. See comment in `airStore`
-                // for details.
-                const w = &f.code.writer;
-                try w.print("memset(&t{d}, 0x00, sizeof(", .{local.new_local});
-                try f.renderType(w, elem_ty);
-                try w.writeAll("));");
-                try f.newline();
-            },
-            .auto, .@"extern" => {},
-        },
-        else => {},
+    if (elem_ty.isBitpack(zcu)) {
+        // For packed aggregates, we zero-initialize to try and work around a design flaw
+        // related to how `packed`, `undefined`, and RLS interact. See comment in `airStore`
+        // for details.
+        const w = &f.code.writer;
+        try w.print("memset(&t{d}, 0x00, sizeof(", .{local.new_local});
+        try f.renderType(w, elem_ty);
+        try w.writeAll("));");
+        try f.newline();
     }
 
     return .{ .local_ref = local.new_local };
@@ -3228,21 +3233,15 @@ fn airRetPtr(f: *Function, inst: Air.Inst.Index) !CValue {
     log.debug("%{d}: allocated unfreeable t{d}", .{ inst, local.new_local });
     try f.allocs.put(zcu.gpa, local.new_local, true);
 
-    switch (elem_ty.zigTypeTag(zcu)) {
-        .@"struct", .@"union" => switch (elem_ty.containerLayout(zcu)) {
-            .@"packed" => {
-                // For packed aggregates, we zero-initialize to try and work around a design flaw
-                // related to how `packed`, `undefined`, and RLS interact. See comment in `airStore`
-                // for details.
-                const w = &f.code.writer;
-                try w.print("memset(&t{d}, 0x00, sizeof(", .{local.new_local});
-                try f.renderType(w, elem_ty);
-                try w.writeAll("));");
-                try f.newline();
-            },
-            .auto, .@"extern" => {},
-        },
-        else => {},
+    if (elem_ty.isBitpack(zcu)) {
+        // For packed aggregates, we zero-initialize to try and work around a design flaw
+        // related to how `packed`, `undefined`, and RLS interact. See comment in `airStore`
+        // for details.
+        const w = &f.code.writer;
+        try w.print("memset(&t{d}, 0x00, sizeof(", .{local.new_local});
+        try f.renderType(w, elem_ty);
+        try w.writeAll("));");
+        try f.newline();
     }
 
     return .{ .local_ref = local.new_local };
@@ -5639,6 +5638,7 @@ fn airUnwrapRestricted(f: *Function, inst: Air.Inst.Index, safety: bool) !CValue
     try reap(f, inst, &.{ty_op.operand});
 
     const w = &f.code.writer;
+    // Implicitly adds the restricted decl dependency on the unrestricted type
     const local = try f.allocLocal(inst, unrestricted_ty);
 
     switch (restricted_ty.restrictedRepr(zcu)) {
@@ -5647,8 +5647,13 @@ fn airUnwrapRestricted(f: *Function, inst: Air.Inst.Index, safety: bool) !CValue
                 const target = &f.dg.mod.resolved_target.result;
                 const ptr_bits = target.ptrBitWidth();
 
-                const int_from_ptr = try f.allocLocal(inst, .usize);
-                try f.writeCValue(w, int_from_ptr, .other);
+                try f.dg.need_restricted.put(zcu.gpa, restricted_ty.toIntern(), {});
+                const unrestricted_size = unrestricted_ty.abiSize(zcu);
+                assert(unrestricted_size > 0);
+                const restricted_ty_name = ip.loadRestrictedType(restricted_ty.toIntern()).name.toSlice(ip);
+
+                const ptr_diff = try f.allocLocal(inst, .usize);
+                try f.writeCValue(w, ptr_diff, .other);
                 try w.print(" = zig_subw_u{d}(({f})", .{
                     ptr_bits,
                     CType.fmtTypeName(.{ .int = .uintptr_t }, zcu),
@@ -5656,29 +5661,46 @@ fn airUnwrapRestricted(f: *Function, inst: Air.Inst.Index, safety: bool) !CValue
                 try f.writeCValue(w, operand, .other);
                 try w.print(", ({f})zig_restricted_{f}__{d}, {f});", .{
                     CType.fmtTypeName(.{ .int = .uintptr_t }, zcu),
-                    fmtIdentUnsolo(restricted_ty.containerTypeName(ip).toSlice(ip)),
+                    fmtIdentUnsolo(restricted_ty_name),
                     restricted_ty.toIntern(),
                     fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits, false, 10, .lower),
                 });
                 try f.newline();
 
-                const rotate_amount = std.math.log2_int(u16, @divExact(ptr_bits, 8));
-                try w.print("if ((zig_shr_u{d}(", .{ptr_bits});
-                try f.writeCValue(w, int_from_ptr, .other);
-                try w.print(", {f}) | zig_shlw_u{d}(", .{
-                    fmtUnsignedIntLiteralSmall(target, .uint8_t, rotate_amount, false, 10, .lower),
-                    ptr_bits,
-                });
-                try f.writeCValue(w, int_from_ptr, .other);
-                try w.print(", {f}, {f})) >= zig_restricted_len_{f}__{d}) {{", .{
-                    fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits - rotate_amount, false, 10, .lower),
-                    fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits, false, 10, .lower),
-                    fmtIdentUnsolo(restricted_ty.containerTypeName(ip).toSlice(ip)),
+                try w.writeAll("if (");
+                if (unrestricted_size == 1) {
+                    try f.writeCValue(w, ptr_diff, .other);
+                } else if (std.math.isPowerOfTwo(unrestricted_size)) {
+                    const rotate_amount = std.math.log2_int(u64, unrestricted_size);
+                    try w.print("(zig_shr_u{d}(", .{ptr_bits});
+                    try f.writeCValue(w, ptr_diff, .other);
+                    try w.print(", {f}) | zig_shlw_u{d}(", .{
+                        fmtUnsignedIntLiteralSmall(target, .uint8_t, rotate_amount, false, 10, .lower),
+                        ptr_bits,
+                    });
+                    try f.writeCValue(w, ptr_diff, .other);
+                    try w.print(", {f}, {f}))", .{
+                        fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits - rotate_amount, false, 10, .lower),
+                        fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits, false, 10, .lower),
+                    });
+                } else {
+                    try f.writeCValue(w, ptr_diff, .other);
+                    try w.print(" % {f} != {f} || ", .{
+                        fmtUnsignedIntLiteralSmall(target, .uintptr_t, unrestricted_size, false, 10, .lower),
+                        fmtUnsignedIntLiteralSmall(target, .uintptr_t, 0, false, 10, .lower),
+                    });
+                    try f.writeCValue(w, ptr_diff, .other);
+                    try w.print(" / {f}", .{
+                        fmtUnsignedIntLiteralSmall(target, .uintptr_t, unrestricted_size, false, 10, .lower),
+                    });
+                }
+                try w.print(" >= zig_restricted_len_{f}__{d}) {{", .{
+                    fmtIdentUnsolo(restricted_ty_name),
                     restricted_ty.toIntern(),
                 });
                 f.indent();
                 try f.newline();
-                try f.writePanic(.corrupt_restricted_pointer, w);
+                try f.writePanic(.corrupt_restricted_value, w);
                 try f.outdent();
                 try w.writeByte('}');
                 try f.newline();
@@ -6484,7 +6506,7 @@ fn airTagName(f: *Function, inst: Air.Inst.Index) !CValue {
     try f.writeCValue(w, local, .other);
     try f.need_tag_name_funcs.put(gpa, enum_ty.toIntern(), {});
     try w.print(" = zig_tagName_{f}__{d}(", .{
-        fmtIdentUnsolo(enum_ty.containerTypeName(ip).toSlice(ip)),
+        fmtIdentUnsolo(ip.loadEnumType(enum_ty.toIntern()).name.toSlice(ip)),
         @intFromEnum(enum_ty.toIntern()),
     });
     try f.writeCValue(w, operand, .other);

@@ -2062,13 +2062,13 @@ pub const Inst = struct {
         /// Implements builtin `@Pointer`.
         /// `operand` is payload index to `ReifyPointer`.
         reify_pointer,
-        /// Implements builtin `@Restricted`.
-        /// `operand` is payload index to `UnNode`.
-        /// `small` contains `NameStrategy`.
-        reify_restricted,
         /// Implements builtin `@Fn`.
         /// `operand` is payload index to `ReifyFn`.
         reify_fn,
+        /// Implements builtin `@Restricted`.
+        /// `operand` is payload index to `ReifyRestricted`.
+        /// `small` contains `NameStrategy`.
+        reify_restricted,
         /// Implements builtin `@Struct`.
         /// `operand` is payload index to `ReifyStruct`.
         /// `small` contains `NameStrategy`.
@@ -3264,6 +3264,13 @@ pub const Inst = struct {
         param_attrs: Ref,
         ret_ty: Ref,
         fn_attrs: Ref,
+    };
+
+    pub const ReifyRestricted = struct {
+        /// This node is absolute, because `reify` instructions are tracked across updates, and
+        /// this simplifies the logic for getting source locations for types.
+        node: Ast.Node.Index,
+        unrestricted_ty: Ref,
     };
 
     pub const ReifyStruct = struct {

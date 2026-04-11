@@ -4679,13 +4679,13 @@ fn lowerConstant(cg: *CodeGen, val: Value) InnerError!WValue {
     switch (ip.indexToKey(val.ip_index)) {
         .int_type,
         .ptr_type,
-        .restricted_ptr_type,
         .array_type,
         .vector_type,
         .opt_type,
         .anyframe_type,
         .error_union_type,
         .simple_type,
+        .restricted_type,
         .struct_type,
         .tuple_type,
         .union_type,
@@ -4779,6 +4779,7 @@ fn lowerConstant(cg: *CodeGen, val: Value) InnerError!WValue {
         },
         .un => unreachable, // packed unions use `bitpack`
         .bitpack => |bitpack| return cg.lowerConstant(.fromInterned(bitpack.backing_int_val)),
+        .restricted_value => return cg.fail("Wasm TODO: LowerConstant for restricted value", .{}),
         .memoized_call => unreachable,
     }
 }

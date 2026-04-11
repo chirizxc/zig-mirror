@@ -135,7 +135,7 @@ pub fn noreturnReturned() noreturn {
     @trap();
 }
 
-pub fn corruptRestrictedPointer() noreturn {
+pub fn corruptRestrictedValue() noreturn {
     @branchHint(.cold);
     @trap();
 }

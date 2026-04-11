@@ -84,7 +84,6 @@ fn ensureLayoutResolvedInner(sema: *Sema, ty: Type, orig_ty: Type, reason: *cons
     switch (ip.indexToKey(ty.toIntern())) {
         .int_type,
         .ptr_type,
-        .restricted_ptr_type,
         .anyframe_type,
         .simple_type,
         .opaque_type,
@@ -106,6 +105,7 @@ fn ensureLayoutResolvedInner(sema: *Sema, ty: Type, orig_ty: Type, reason: *cons
         .tuple_type => |tuple| for (tuple.types.get(ip)) |field_ty| {
             try ensureLayoutResolvedInner(sema, .fromInterned(field_ty), orig_ty, reason);
         },
+        .restricted_type => |restricted_type| return ensureLayoutResolvedInner(sema, .fromInterned(restricted_type.unrestricted_type), orig_ty, reason),
         .struct_type, .union_type, .enum_type => {
             try sema.declareDependency(.{ .type_layout = ty.toIntern() });
             try sema.addReferenceEntry(null, reason.src, .wrap(.{ .type_layout = ty.toIntern() }));
@@ -132,6 +132,7 @@ fn ensureLayoutResolvedInner(sema: *Sema, ty: Type, orig_ty: Type, reason: *cons
         .aggregate,
         .un,
         .bitpack,
+        .restricted_value,
         // memoization, not types
         .memoized_call,
         => unreachable,

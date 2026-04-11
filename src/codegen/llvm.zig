@@ -708,16 +708,17 @@ pub const Object = struct {
             rd.* = undefined;
         }
     };
-    pub fn getRestrictedDecls(o: *Object, ty: Type) Allocator.Error!*RestrictedDecls {
-        const gop = try o.restricted_map.getOrPut(o.gpa, ty.toIntern());
+    pub fn getRestrictedDecls(o: *Object, restricted_ty: Type) Allocator.Error!*RestrictedDecls {
+        const gop = try o.restricted_map.getOrPut(o.gpa, restricted_ty.toIntern());
         if (gop.found_existing) return gop.value_ptr;
         errdefer _ = o.restricted_map.pop().?;
 
-        const target = o.zcu.getTarget();
-        const ip = &o.zcu.intern_pool;
-        const ptr_align = Type.ptrAbiAlignment(target).toLlvm();
+        const zcu = o.zcu;
+        const target = zcu.getTarget();
+        const ip = &zcu.intern_pool;
+        const unrestricted_ty = restricted_ty.unrestrictedType(zcu).?;
 
-        const ty_name = ty.containerTypeName(ip).toSlice(ip);
+        const ty_name = ip.loadRestrictedType(restricted_ty.toIntern()).name.toSlice(ip);
         gop.value_ptr.* = .{
             .len = try o.builder.addVariable(
                 try o.builder.strtabStringFmt("{s}.len", .{ty_name}),
@@ -733,11 +734,11 @@ pub const Object = struct {
         };
         gop.value_ptr.len.setLinkage(.private, &o.builder);
         gop.value_ptr.len.setMutability(.constant, &o.builder);
-        gop.value_ptr.len.setAlignment(ptr_align, &o.builder);
+        gop.value_ptr.len.setAlignment(Type.ptrAbiAlignment(target).toLlvm(), &o.builder);
         gop.value_ptr.len.setUnnamedAddr(.unnamed_addr, &o.builder);
         gop.value_ptr.array.setLinkage(.private, &o.builder);
         gop.value_ptr.array.setMutability(.constant, &o.builder);
-        gop.value_ptr.array.setAlignment(ptr_align, &o.builder);
+        gop.value_ptr.array.setAlignment(unrestricted_ty.abiAlignment(zcu).toLlvm(), &o.builder);
         // Setting unnamed_addr here would reduce safety, and the module emitting the safety checks may not be the same module
         // that defined the restricted type. In any case, llvm will add unnamed_addr itself if no safety checks end up being emitted.
         gop.value_ptr.array.setUnnamedAddr(.default, &o.builder);
@@ -750,10 +751,13 @@ pub const Object = struct {
                 try o.builder.intConst(restricted_decls.len.typeOf(&o.builder), len),
                 &o.builder,
             );
-            try restricted_decls.array.setInitializer(try o.builder.arrayConst(
-                try o.builder.arrayType(len, .ptr),
-                restricted_decls.values.values(),
-            ), &o.builder);
+            try restricted_decls.array.setInitializer(switch (len) {
+                0 => try o.builder.structConst(try o.builder.structType(.normal, &.{}), &.{}),
+                else => try o.builder.arrayConst(
+                    try o.builder.arrayType(len, restricted_decls.values.values()[0].typeOf(&o.builder)),
+                    restricted_decls.values.values(),
+                ),
+            }, &o.builder);
         }
     }
 
@@ -2023,7 +2027,7 @@ pub const Object = struct {
     fn lowerDebugType(
         o: *Object,
         pt: Zcu.PerThread,
-        ty: Type,
+        start_ty: Type,
         ty_fwd_ref: Builder.Metadata,
     ) Allocator.Error!Builder.Metadata {
         assert(!o.builder.strip);
@@ -2033,7 +2037,7 @@ pub const Object = struct {
         const target = zcu.getTarget();
         const ip = &zcu.intern_pool;
 
-        const name = try o.builder.metadataStringFmt("{f}", .{ty.fmt(pt)});
+        const name = try o.builder.metadataStringFmt("{f}", .{start_ty.fmt(pt)});
 
         // lldb cannot handle non-byte-sized types, so in the logic below, bit sizes are padded up.
         // For instance, `bool` is considered to be 8 bits, and `u60` is considered to be 64 bits.
@@ -2043,6 +2047,24 @@ pub const Object = struct {
         // improve UX significantly. GDB handles this perfectly fine, but unfortunately, LLDB has no
         // handling for variants at all, and will never print fields in them, so I opted not to use
         // them for now.
+
+        const ty = if (start_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (start_ty.restrictedRepr(zcu)) {
+            .indirect => {
+                const ptr_size = Type.ptrAbiSize(zcu.getTarget());
+                const ptr_align = Type.ptrAbiAlignment(zcu.getTarget());
+                return o.builder.debugPointerType(
+                    name,
+                    null, // file
+                    o.debug_compile_unit.unwrap().?, // scope
+                    0, // line
+                    try o.getDebugType(pt, unrestricted_ty),
+                    ptr_size * 8,
+                    ptr_align.toByteUnits().? * 8,
+                    0, // offset
+                );
+            },
+            .direct => unrestricted_ty,
+        } else start_ty;
 
         switch (ty.zigTypeTag(zcu)) {
             .void,
@@ -2071,64 +2093,52 @@ pub const Object = struct {
             .pointer => {
                 const ptr_size = Type.ptrAbiSize(zcu.getTarget());
                 const ptr_align = Type.ptrAbiAlignment(zcu.getTarget());
-                switch (ty.restrictedRepr(zcu)) {
-                    .indirect => return o.builder.debugPointerType(
+                if (ty.isSlice(zcu)) {
+                    const debug_ptr_type = try o.builder.debugMemberType(
+                        try o.builder.metadataString("ptr"),
+                        null, // file
+                        ty_fwd_ref,
+                        0, // line
+                        try o.getDebugType(pt, ty.slicePtrFieldType(zcu)),
+                        ptr_size * 8,
+                        ptr_align.toByteUnits().? * 8,
+                        0, // offset
+                    );
+
+                    const debug_len_type = try o.builder.debugMemberType(
+                        try o.builder.metadataString("len"),
+                        null, // file
+                        ty_fwd_ref,
+                        0, // line
+                        try o.getDebugType(pt, .usize),
+                        ptr_size * 8,
+                        ptr_align.toByteUnits().? * 8,
+                        ptr_size * 8,
+                    );
+
+                    return o.builder.debugStructType(
                         name,
                         null, // file
                         o.debug_compile_unit.unwrap().?, // scope
                         0, // line
-                        try o.getDebugType(pt, ty.unrestrictedType(zcu).?),
-                        ptr_size * 8,
+                        null, // underlying type
+                        ptr_size * 2 * 8,
                         ptr_align.toByteUnits().? * 8,
-                        0, // offset
-                    ),
-                    .direct => if (ty.isSlice(zcu)) {
-                        const debug_ptr_type = try o.builder.debugMemberType(
-                            try o.builder.metadataString("ptr"),
-                            null, // file
-                            ty_fwd_ref,
-                            0, // line
-                            try o.getDebugType(pt, ty.slicePtrFieldType(zcu)),
-                            ptr_size * 8,
-                            ptr_align.toByteUnits().? * 8,
-                            0, // offset
-                        );
-
-                        const debug_len_type = try o.builder.debugMemberType(
-                            try o.builder.metadataString("len"),
-                            null, // file
-                            ty_fwd_ref,
-                            0, // line
-                            try o.getDebugType(pt, .usize),
-                            ptr_size * 8,
-                            ptr_align.toByteUnits().? * 8,
-                            ptr_size * 8,
-                        );
-
-                        return o.builder.debugStructType(
-                            name,
-                            null, // file
-                            o.debug_compile_unit.unwrap().?, // scope
-                            0, // line
-                            null, // underlying type
-                            ptr_size * 2 * 8,
-                            ptr_align.toByteUnits().? * 8,
-                            try o.builder.metadataTuple(&.{
-                                debug_ptr_type,
-                                debug_len_type,
-                            }),
-                        );
-                    } else return o.builder.debugPointerType(
-                        name,
-                        null, // file
-                        o.debug_compile_unit.unwrap().?, // scope
-                        0, // line
-                        try o.getDebugType(pt, ty.childType(zcu)),
-                        ptr_size * 8,
-                        ptr_align.toByteUnits().? * 8,
-                        0, // offset
-                    ),
-                }
+                        try o.builder.metadataTuple(&.{
+                            debug_ptr_type,
+                            debug_len_type,
+                        }),
+                    );
+                } else return o.builder.debugPointerType(
+                    name,
+                    null, // file
+                    o.debug_compile_unit.unwrap().?, // scope
+                    0, // line
+                    try o.getDebugType(pt, ty.childType(zcu)),
+                    ptr_size * 8,
+                    ptr_align.toByteUnits().? * 8,
+                    0, // offset
+                );
             },
             .array => return o.builder.debugArrayType(
                 name,
@@ -3121,7 +3131,7 @@ pub const Object = struct {
             .empty_tuple,
             .none,
             => unreachable,
-            else => t: switch (ip.indexToKey(t.toIntern())) {
+            else => switch (ip.indexToKey(t.toIntern())) {
                 .int_type => |int_type| try o.builder.intType(int_type.bits),
                 .ptr_type => |ptr_type| type: {
                     const ptr_ty = try o.builder.ptrType(
@@ -3134,10 +3144,6 @@ pub const Object = struct {
                             try o.lowerType(.usize),
                         }),
                     };
-                },
-                .restricted_ptr_type => |restricted_ptr_type| switch (t.restrictedRepr(zcu)) {
-                    .indirect => .ptr,
-                    .direct => continue :t .{ .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type },
                 },
                 .array_type => |array_type| o.builder.arrayType(
                     array_type.lenIncludingSentinel(),
@@ -3217,6 +3223,10 @@ pub const Object = struct {
                     return o.builder.structType(.normal, fields[0..fields_len]);
                 },
                 .simple_type => unreachable,
+                .restricted_type => |restricted_type| switch (t.restrictedRepr(zcu)) {
+                    .indirect => .ptr,
+                    .direct => try o.lowerType(.fromInterned(restricted_type.unrestricted_type)),
+                },
                 .struct_type => {
                     if (o.type_map.get(t.toIntern())) |value| return value;
 
@@ -3430,6 +3440,7 @@ pub const Object = struct {
                 .aggregate,
                 .un,
                 .bitpack,
+                .restricted_value,
                 // memoization, not types
                 .memoized_call,
                 => unreachable,
@@ -3521,13 +3532,13 @@ pub const Object = struct {
         return switch (val_key) {
             .int_type,
             .ptr_type,
-            .restricted_ptr_type,
             .array_type,
             .vector_type,
             .opt_type,
             .anyframe_type,
             .error_union_type,
             .simple_type,
+            .restricted_type,
             .struct_type,
             .tuple_type,
             .union_type,
@@ -3622,27 +3633,7 @@ pub const Object = struct {
                 128 => try o.builder.fp128Const(val.toFloat(f128, zcu)),
                 else => unreachable,
             },
-            .ptr => switch (ty.restrictedRepr(zcu)) {
-                .indirect => {
-                    const restricted_decls = try o.getRestrictedDecls(ty);
-                    const gop = try restricted_decls.values.getOrPut(o.gpa, arg_val);
-                    if (!gop.found_existing) gop.value_ptr.* = try o.lowerValue(try ip.getCoerced(
-                        zcu.gpa,
-                        zcu.comp.io,
-                        .main, // FIXME
-                        arg_val,
-                        ty.unrestrictedType(zcu).?.toIntern(),
-                    ));
-                    return o.builder.gepConst(
-                        .inbounds,
-                        .ptr,
-                        restricted_decls.array.toConst(&o.builder),
-                        null,
-                        &.{try o.builder.intConst(.i64, gop.index)},
-                    );
-                },
-                .direct => try o.lowerPtr(arg_val, 0),
-            },
+            .ptr => try o.lowerPtr(arg_val, 0),
             .slice => |slice| return o.builder.structConst(try o.lowerType(ty), &.{
                 try o.lowerValue(slice.ptr),
                 try o.lowerValue(slice.len),
@@ -4005,6 +3996,21 @@ pub const Object = struct {
                     try o.builder.structType(union_ty.structKind(&o.builder), fields[0..len])
                 else
                     union_ty, vals[0..len]);
+            },
+            .restricted_value => |restricted_value| switch (ty.restrictedRepr(zcu)) {
+                .indirect => {
+                    const restricted_decls = try o.getRestrictedDecls(ty);
+                    const gop = try restricted_decls.values.getOrPut(o.gpa, arg_val);
+                    if (!gop.found_existing) gop.value_ptr.* = try o.lowerValue(restricted_value.unrestricted_value);
+                    return o.builder.gepConst(
+                        .inbounds,
+                        gop.value_ptr.typeOf(&o.builder),
+                        restricted_decls.array.toConst(&o.builder),
+                        null,
+                        &.{try o.builder.intConst(.i64, gop.index)},
+                    );
+                },
+                .direct => try o.lowerValue(restricted_value.unrestricted_value),
             },
             .memoized_call => unreachable,
         };

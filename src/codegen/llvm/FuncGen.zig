@@ -3266,6 +3266,8 @@ fn airUnwrapRestricted(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocat
             if (safety) {
                 const restricted_decls = try o.getRestrictedDecls(restricted_ty);
                 const llvm_usize_ty = restricted_decls.len.typeOf(&o.builder);
+                const unrestricted_size = unrestricted_ty.abiSize(zcu);
+                assert(unrestricted_size > 0);
                 const array = try o.builder.castConst(.ptrtoint, restricted_decls.array.toConst(&o.builder), llvm_usize_ty);
                 const ptr_diff = try fg.wip.bin(
                     .sub,
@@ -3273,11 +3275,6 @@ fn airUnwrapRestricted(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocat
                     array.toValue(),
                     "unwrap_restricted.ptr_diff",
                 );
-                const index = try fg.wip.callIntrinsic(.normal, .none, .fshr, &.{llvm_usize_ty}, &.{
-                    ptr_diff,
-                    ptr_diff,
-                    try o.builder.intValue(llvm_usize_ty, std.math.log2_int(u64, Type.ptrAbiSize(target))),
-                }, "unwrap_restricted.index");
                 const len = try fg.wip.load(
                     .normal,
                     llvm_usize_ty,
@@ -3285,18 +3282,38 @@ fn airUnwrapRestricted(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocat
                     Type.ptrAbiAlignment(target).toLlvm(),
                     "unwrap_restricted.len",
                 );
-                const ok = try fg.wip.icmp(.ult, index, len, "unwrap_restricted.ok");
-
-                const invalid_block = try fg.wip.block(1, "unwrap_restricted.invalid");
+                const is_po2_unrestricted_size = std.math.isPowerOfTwo(unrestricted_size);
+                const check_block = if (is_po2_unrestricted_size) undefined else try fg.wip.block(1, "unwrap_restricted.check");
+                const invalid_block = try fg.wip.block(if (is_po2_unrestricted_size) 1 else 2, "unwrap_restricted.invalid");
                 const valid_block = try fg.wip.block(1, "unwrap_restricted.valid");
-                _ = try fg.wip.brCond(ok, valid_block, invalid_block, .none);
+                if (is_po2_unrestricted_size) {
+                    const index = if (unrestricted_size == 1)
+                        ptr_diff
+                    else
+                        try fg.wip.callIntrinsic(.normal, .none, .fshr, &.{llvm_usize_ty}, &.{
+                            ptr_diff,
+                            ptr_diff,
+                            try o.builder.intValue(llvm_usize_ty, std.math.log2_int(u64, unrestricted_size)),
+                        }, "unwrap_restricted.index");
+                    const ok = try fg.wip.icmp(.ult, index, len, "unwrap_restricted.ok");
+                    _ = try fg.wip.brCond(ok, valid_block, invalid_block, .none);
+                } else {
+                    const unrestricted_size_value = try o.builder.intValue(llvm_usize_ty, unrestricted_size);
+                    const misalignment = try fg.wip.bin(.urem, ptr_diff, unrestricted_size_value, "unwrap_restricted.misalignment");
+                    const misaligned = try fg.wip.icmp(.ne, misalignment, try o.builder.intValue(llvm_usize_ty, 0), "unwrap_restricted.misaligned");
+                    _ = try fg.wip.brCond(misaligned, invalid_block, check_block, .none);
 
+                    fg.wip.cursor = .{ .block = check_block };
+                    const index = try fg.wip.bin(.@"udiv exact", ptr_diff, unrestricted_size_value, "unwrap_restricted.index");
+                    const ok = try fg.wip.icmp(.ult, index, len, "unwrap_restricted.ok");
+                    _ = try fg.wip.brCond(ok, valid_block, invalid_block, .none);
+                }
                 fg.wip.cursor = .{ .block = invalid_block };
-                try fg.buildSimplePanic(.corrupt_restricted_pointer);
+                try fg.buildSimplePanic(.corrupt_restricted_value);
 
                 fg.wip.cursor = .{ .block = valid_block };
             }
-            return fg.wip.load(.normal, .ptr, operand, unrestricted_ty.abiAlignment(zcu).toLlvm(), "unwrap_restricted");
+            return fg.load(operand, unrestricted_ty, unrestricted_ty.abiAlignment(zcu).toLlvm(), .normal);
         },
         .direct => return operand,
     }
@@ -7275,7 +7292,11 @@ pub fn buildAllocaInner(
 /// This is the one source of truth for whether a type is passed around as an LLVM pointer,
 /// or as an LLVM value.
 pub fn isByRef(ty: Type, zcu: *const Zcu) bool {
-    return switch (ty.zigTypeTag(zcu)) {
+    const unrestricted_ty = if (ty.unrestrictedType(zcu)) |unrestricted_ty| switch (ty.restrictedRepr(zcu)) {
+        .indirect => return false,
+        .direct => unrestricted_ty,
+    } else ty;
+    return switch (unrestricted_ty.zigTypeTag(zcu)) {
         .type,
         .comptime_int,
         .comptime_float,
@@ -7300,19 +7321,19 @@ pub fn isByRef(ty: Type, zcu: *const Zcu) bool {
 
         .array,
         .frame,
-        => ty.hasRuntimeBits(zcu),
+        => unrestricted_ty.hasRuntimeBits(zcu),
 
-        .error_union => ty.errorUnionPayload(zcu).hasRuntimeBits(zcu),
+        .error_union => unrestricted_ty.errorUnionPayload(zcu).hasRuntimeBits(zcu),
 
-        .optional => !ty.optionalReprIsPayload(zcu) and ty.optionalChild(zcu).hasRuntimeBits(zcu),
+        .optional => !unrestricted_ty.optionalReprIsPayload(zcu) and unrestricted_ty.optionalChild(zcu).hasRuntimeBits(zcu),
 
-        .@"struct" => switch (ty.containerLayout(zcu)) {
+        .@"struct" => switch (unrestricted_ty.containerLayout(zcu)) {
             .@"packed" => false,
-            .auto, .@"extern" => ty.hasRuntimeBits(zcu),
+            .auto, .@"extern" => unrestricted_ty.hasRuntimeBits(zcu),
         },
-        .@"union" => switch (ty.containerLayout(zcu)) {
+        .@"union" => switch (unrestricted_ty.containerLayout(zcu)) {
             .@"packed" => false,
-            else => ty.hasRuntimeBits(zcu) and !ty.unionHasAllZeroBitFieldTypes(zcu),
+            else => unrestricted_ty.hasRuntimeBits(zcu) and !unrestricted_ty.unionHasAllZeroBitFieldTypes(zcu),
         },
     };
 }

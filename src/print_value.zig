@@ -49,7 +49,6 @@ pub fn print(
     switch (ip.indexToKey(val.toIntern())) {
         .int_type,
         .ptr_type,
-        .restricted_ptr_type,
         .array_type,
         .vector_type,
         .opt_type,
@@ -64,6 +63,7 @@ pub fn print(
         .func_type,
         .error_set_type,
         .inferred_error_set_type,
+        .restricted_type,
         => try Type.print(val.toType(), writer, pt, null),
         .undef => try writer.writeAll("undefined"),
         .simple_value => |simple_value| switch (simple_value) {
@@ -88,7 +88,7 @@ pub fn print(
             .err_name => |err_name| try writer.print("error.{f}", .{
                 err_name.fmt(ip),
             }),
-            .payload => |payload| try print(Value.fromInterned(payload), writer, level, pt, opt_sema),
+            .payload => |payload| try print(.fromInterned(payload), writer, level, pt, opt_sema),
         },
         .enum_literal => |enum_literal| try writer.print(".{f}", .{
             enum_literal.fmt(ip),
@@ -102,7 +102,7 @@ pub fn print(
                 return writer.writeAll("@enumFromInt(...)");
             }
             try writer.writeAll("@enumFromInt(");
-            try print(Value.fromInterned(enum_tag.int), writer, level - 1, pt, opt_sema);
+            try print(.fromInterned(enum_tag.int), writer, level - 1, pt, opt_sema);
             try writer.writeAll(")");
         },
         .float => |float| switch (float.storage) {
@@ -130,7 +130,7 @@ pub fn print(
             if (level == 0) {
                 try writer.writeAll("(...)");
             } else {
-                try print(Value.fromInterned(slice.len), writer, level - 1, pt, opt_sema);
+                try print(.fromInterned(slice.len), writer, level - 1, pt, opt_sema);
             }
             try writer.writeAll("]");
         },
@@ -148,7 +148,7 @@ pub fn print(
         },
         .opt => |opt| switch (opt.val) {
             .none => try writer.writeAll("null"),
-            else => |payload| try print(Value.fromInterned(payload), writer, level, pt, opt_sema),
+            else => |payload| try print(.fromInterned(payload), writer, level, pt, opt_sema),
         },
         .aggregate => |aggregate| try printAggregate(val, aggregate, false, writer, level, pt, opt_sema),
         .un => |un| {
@@ -159,13 +159,13 @@ pub fn print(
             if (un.tag == .none) {
                 const backing_ty = try val.typeOf(zcu).externUnionBackingType(pt);
                 try writer.print("@bitCast(@as({f}, ", .{backing_ty.fmt(pt)});
-                try print(Value.fromInterned(un.val), writer, level - 1, pt, opt_sema);
+                try print(.fromInterned(un.val), writer, level - 1, pt, opt_sema);
                 try writer.writeAll("))");
             } else {
                 try writer.writeAll(".{ ");
-                try print(Value.fromInterned(un.tag), writer, level - 1, pt, opt_sema);
+                try print(.fromInterned(un.tag), writer, level - 1, pt, opt_sema);
                 try writer.writeAll(" = ");
-                try print(Value.fromInterned(un.val), writer, level - 1, pt, opt_sema);
+                try print(.fromInterned(un.val), writer, level - 1, pt, opt_sema);
                 try writer.writeAll(" }");
             }
         },
@@ -198,6 +198,7 @@ pub fn print(
                 else => unreachable,
             }
         },
+        .restricted_value => |restricted_value| try print(.fromInterned(restricted_value.unrestricted_value), writer, level, pt, opt_sema),
         .memoized_call => unreachable,
     }
 }
@@ -470,7 +471,7 @@ pub fn printPtrDerivation(
                 if (x.level == 0) {
                     try writer.writeAll("...");
                 } else {
-                    try print(Value.fromInterned(uav.val), writer, x.level - 1, pt, x.opt_sema);
+                    try print(.fromInterned(uav.val), writer, x.level - 1, pt, x.opt_sema);
                 }
                 try writer.writeByte(')');
             },

@@ -5771,9 +5771,9 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
 
       {#header_open|@Restricted#}
       <pre>{#syntax#}@Restricted(
-    comptime Pointer: type,
+    comptime Underlying: type,
 ) type{#endsyntax#}</pre>
-      <p>Returns a restricted pointer type based on the specified pointer type.</p>
+      <p>Returns a restricted type based on the specified underlying type.</p>
       {#header_close#}
 
       {#header_open|@Fn#}

@@ -232,15 +232,26 @@ const LazySymbolStructure = struct {
         operation: Operation,
 
         pub const Operation = enum {
-            ptr_inc,
+            end_ptr_inc,
 
-            pub fn apply(operation: Operation, slice: []u8, endian: std.builtin.Endian) void {
+            pub fn apply(operation: Operation, slice: []u8, target_opts: struct {
+                ptr_bit_width: u16,
+                endian: std.builtin.Endian,
+            }) void {
                 switch (operation) {
-                    .ptr_inc => switch (slice.len) {
+                    .end_ptr_inc => switch (target_opts.ptr_bit_width) {
                         else => unreachable,
-                        2 => std.mem.writeInt(u16, slice[0..2], std.mem.readInt(u16, slice[0..2], endian) + 1, endian),
-                        4 => std.mem.writeInt(u32, slice[0..4], std.mem.readInt(u32, slice[0..4], endian) + 1, endian),
-                        8 => std.mem.writeInt(u64, slice[0..8], std.mem.readInt(u64, slice[0..8], endian) + 1, endian),
+                        inline 16, 32, 64 => |ptr_bit_width| {
+                            const ptr_size = @divExact(ptr_bit_width, 8);
+                            const TargetPtrInt = @Int(.unsigned, ptr_bit_width);
+                            const end_slice = slice[slice.len - ptr_size ..][0..ptr_size];
+                            std.mem.writeInt(
+                                TargetPtrInt,
+                                end_slice,
+                                std.mem.readInt(TargetPtrInt, end_slice, target_opts.endian) + 1,
+                                target_opts.endian,
+                            );
+                        },
                     },
                 }
             }
@@ -279,14 +290,14 @@ pub fn getLazySymbolInfo(
                 .structure => .{},
                 .attributes => .{ .required_alignment = .@"1" },
             },
-            .restricted_ptr_type => |restricted_ptr_type| switch (kind) {
+            .restricted_type => |restricted_type| switch (kind) {
                 .structure => .{},
                 .attributes => {
-                    const restricted_ptr_ty: Type = .fromInterned(lazy_sym.key);
-                    const unrestricted_ptr_ty: Type =
-                        .fromInterned(restricted_ptr_type.unrestricted_ptr_type);
-                    return .{ .required_alignment = restricted_ptr_ty.abiAlignment(zcu)
-                        .maxStrict(unrestricted_ptr_ty.abiAlignment(zcu)) };
+                    const restricted_ty: Type = .fromInterned(lazy_sym.key);
+                    const unrestricted_ty: Type =
+                        .fromInterned(restricted_type.unrestricted_type);
+                    return .{ .required_alignment = restricted_ty.abiAlignment(zcu)
+                        .maxStrict(unrestricted_ty.abiAlignment(zcu)) };
                 },
             },
         },
@@ -298,31 +309,32 @@ pub fn getLazySymbolInfo(
             },
             _ => switch (ip.indexToKey(lazy_sym.key)) {
                 else => unreachable,
-                .ptr => |ptr| switch (ip.indexToKey(ptr.ty)) {
-                    else => unreachable,
-                    .restricted_ptr_type => |restricted_ptr_type| switch (kind) {
-                        .structure => .{ .parent = .{ .kind = .const_data, .key = ptr.ty }, .modify = .{
-                            .lazy_sym = .{ .kind = .deferred_const_data, .key = ptr.ty },
-                            .operation = .ptr_inc,
-                        } },
-                        .attributes => {
-                            const unrestricted_ptr_ty: Type =
-                                .fromInterned(restricted_ptr_type.unrestricted_ptr_type);
-                            return .{
-                                .required_alignment = unrestricted_ptr_ty.abiAlignment(zcu),
-                                .size = unrestricted_ptr_ty.abiSize(zcu),
-                            };
-                        },
+                .restricted_value => |restricted_value| switch (kind) {
+                    .structure => .{ .parent = .{ .kind = .const_data, .key = restricted_value.ty }, .modify = .{
+                        .lazy_sym = .{ .kind = .deferred_const_data, .key = restricted_value.ty },
+                        .operation = .end_ptr_inc,
+                    } },
+                    .attributes => {
+                        const unrestricted_ty: Type = .fromInterned(
+                            ip.indexToKey(restricted_value.ty).restricted_type.unrestricted_type,
+                        );
+                        return .{
+                            .required_alignment = unrestricted_ty.abiAlignment(zcu),
+                            .size = unrestricted_ty.abiSize(zcu),
+                        };
                     },
                 },
-                .restricted_ptr_type => switch (kind) {
+                .restricted_type => switch (kind) {
                     .structure => .{ .parent = .{ .kind = .const_data, .key = lazy_sym.key } },
                     .attributes => {
-                        const restricted_ptr_ty: Type = .fromInterned(lazy_sym.key);
+                        const restricted_ty: Type = .fromInterned(lazy_sym.key);
+                        const unrestricted_ty: Type = .fromInterned(
+                            ip.indexToKey(lazy_sym.key).restricted_type.unrestricted_type,
+                        );
                         return .{
                             .header = true,
-                            .required_alignment = restricted_ptr_ty.abiAlignment(zcu),
-                            .size = restricted_ptr_ty.abiSize(zcu),
+                            .required_alignment = restricted_ty.abiAlignment(zcu),
+                            .size = unrestricted_ty.abiAlignment(zcu).forward(restricted_ty.abiSize(zcu)),
                         };
                     },
                 },
@@ -367,7 +379,7 @@ pub fn generateLazySymbol(
                 }
                 return;
             },
-            .restricted_ptr_type => return,
+            .restricted_type => return,
             else => {},
         },
         .deferred_const_data => switch (lazy_sym.key) {
@@ -392,25 +404,10 @@ pub fn generateLazySymbol(
                 return;
             },
             _ => switch (ip.indexToKey(lazy_sym.key)) {
-                .ptr => |ptr| switch (ip.indexToKey(ptr.ty)) {
-                    .restricted_ptr_type => |restricted_ptr_type| return lowerPtr(
-                        bin_file,
-                        pt,
-                        src_loc,
-                        try ip.getCoerced(
-                            comp.gpa,
-                            comp.io,
-                            pt.tid,
-                            lazy_sym.key,
-                            restricted_ptr_type.unrestricted_ptr_type,
-                        ),
-                        w,
-                        reloc_parent,
-                        0,
-                    ),
-                    else => {},
-                },
-                .restricted_ptr_type => return w.splatByteAll(0, @divExact(zcu.getTarget().ptrBitWidth(), 8)),
+                .restricted_value => |restricted_value| return generateSymbol(bin_file, pt, src_loc, .fromInterned(
+                    restricted_value.unrestricted_value,
+                ), w, reloc_parent),
+                .restricted_type => return w.splatByteAll(0, @divExact(zcu.getTarget().ptrBitWidth(), 8)),
                 else => {},
             },
             else => {},
@@ -463,13 +460,13 @@ pub fn generateSymbol(
     switch (ip.indexToKey(val.toIntern())) {
         .int_type,
         .ptr_type,
-        .restricted_ptr_type,
         .array_type,
         .vector_type,
         .opt_type,
         .anyframe_type,
         .error_union_type,
         .simple_type,
+        .restricted_type,
         .struct_type,
         .tuple_type,
         .union_type,
@@ -576,10 +573,7 @@ pub fn generateSymbol(
                 128 => try w.writeInt(u128, @bitCast(f128_val), endian),
             },
         },
-        .ptr => switch (ty.restrictedRepr(zcu)) {
-            .indirect => try lowerLazySymbolRef(bin_file, pt, .{ .kind = .deferred_const_data, .key = val.toIntern() }, w, reloc_parent, 0),
-            .direct => try lowerPtr(bin_file, pt, src_loc, val.toIntern(), w, reloc_parent, 0),
-        },
+        .ptr => try lowerPtr(bin_file, pt, src_loc, val.toIntern(), w, reloc_parent, 0),
         .slice => |slice| {
             try generateSymbol(bin_file, pt, src_loc, Value.fromInterned(slice.ptr), w, reloc_parent);
             try generateSymbol(bin_file, pt, src_loc, Value.fromInterned(slice.len), w, reloc_parent);
@@ -788,6 +782,10 @@ pub fn generateSymbol(
             }
         },
         .bitpack => |bitpack| try generateSymbol(bin_file, pt, src_loc, .fromInterned(bitpack.backing_int_val), w, reloc_parent),
+        .restricted_value => |restricted_value| switch (ty.restrictedRepr(zcu)) {
+            .indirect => try lowerLazySymbolRef(bin_file, pt, .{ .kind = .deferred_const_data, .key = val.toIntern() }, w, reloc_parent, 0),
+            .direct => try generateSymbol(bin_file, pt, src_loc, .fromInterned(restricted_value.unrestricted_value), w, reloc_parent),
+        },
         .memoized_call => unreachable,
     }
 }
@@ -1185,55 +1183,57 @@ const LowerResult = union(enum) {
     lea_lazy_sym: link.File.LazySymbol,
 };
 
-pub fn lowerValue(pt: Zcu.PerThread, val: Value, target: *const std.Target) Allocator.Error!LowerResult {
+pub fn lowerValue(pt: Zcu.PerThread, start_val: Value, target: *const std.Target) Allocator.Error!LowerResult {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    const ty = val.typeOf(zcu);
+    const start_ty = start_val.typeOf(zcu);
 
-    log.debug("lowerValue(@as({f}, {f}))", .{ ty.fmt(pt), val.fmtValue(pt) });
+    log.debug("lowerValue(@as({f}, {f}))", .{ start_ty.fmt(pt), start_val.fmtValue(pt) });
 
-    if (val.isUndef(zcu)) return .undef;
+    if (start_val.isUndef(zcu)) return .undef;
+
+    const ty, const val: Value = if (start_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (start_ty.restrictedRepr(zcu)) {
+        .indirect => return .{ .lea_lazy_sym = .{ .kind = .deferred_const_data, .key = start_val.toIntern() } },
+        .direct => .{ unrestricted_ty, .fromInterned(ip.indexToKey(start_val.toIntern()).restricted_value.unrestricted_value) },
+    } else .{ start_ty, start_val };
 
     switch (ty.zigTypeTag(zcu)) {
         .void => return .none,
         .bool => return .{ .immediate = @intFromBool(val.toBool()) },
         .pointer => switch (ty.ptrSize(zcu)) {
             .slice => {},
-            .one, .many, .c => switch (ty.restrictedRepr(zcu)) {
-                .indirect => return .{ .lea_lazy_sym = .{ .kind = .deferred_const_data, .key = val.toIntern() } },
-                .direct => {
-                    const ptr = ip.indexToKey(val.toIntern()).ptr;
-                    if (ptr.base_addr == .int) return .{ .immediate = ptr.byte_offset };
-                    if (ptr.byte_offset == 0) switch (ptr.base_addr) {
-                        .int => unreachable, // handled above
+            .one, .many, .c => {
+                const ptr = ip.indexToKey(val.toIntern()).ptr;
+                if (ptr.base_addr == .int) return .{ .immediate = ptr.byte_offset };
+                if (ptr.byte_offset == 0) switch (ptr.base_addr) {
+                    .int => unreachable, // handled above
 
-                        .nav => |nav_index| {
-                            const nav = ip.getNav(nav_index);
-                            const nav_ty: Type = .fromInterned(nav.resolved.?.type);
-                            if (nav_ty.isRuntimeFnOrHasRuntimeBits(zcu) or nav.getExtern(ip) != null) {
-                                return .{ .lea_nav = nav_index };
-                            } else {
-                                // Create the 0xaa bit pattern...
-                                const undef_ptr_bits: u64 = @intCast((@as(u66, 1) << @intCast(target.ptrBitWidth() + 1)) / 3);
-                                // ...but align the pointer
-                                const alignment = zcu.navAlignment(nav_index);
-                                return .{ .immediate = alignment.forward(undef_ptr_bits) };
-                            }
-                        },
-
-                        .uav => |uav| if (Value.fromInterned(uav.val).typeOf(zcu).isRuntimeFnOrHasRuntimeBits(zcu)) {
-                            return .{ .lea_uav = uav };
+                    .nav => |nav_index| {
+                        const nav = ip.getNav(nav_index);
+                        const nav_ty: Type = .fromInterned(nav.resolved.?.type);
+                        if (nav_ty.isRuntimeFnOrHasRuntimeBits(zcu) or nav.getExtern(ip) != null) {
+                            return .{ .lea_nav = nav_index };
                         } else {
                             // Create the 0xaa bit pattern...
                             const undef_ptr_bits: u64 = @intCast((@as(u66, 1) << @intCast(target.ptrBitWidth() + 1)) / 3);
                             // ...but align the pointer
-                            const alignment = Type.fromInterned(uav.orig_ty).ptrAlignment(zcu);
+                            const alignment = zcu.navAlignment(nav_index);
                             return .{ .immediate = alignment.forward(undef_ptr_bits) };
-                        },
+                        }
+                    },
 
-                        else => {},
-                    };
-                },
+                    .uav => |uav| if (Value.fromInterned(uav.val).typeOf(zcu).isRuntimeFnOrHasRuntimeBits(zcu)) {
+                        return .{ .lea_uav = uav };
+                    } else {
+                        // Create the 0xaa bit pattern...
+                        const undef_ptr_bits: u64 = @intCast((@as(u66, 1) << @intCast(target.ptrBitWidth() + 1)) / 3);
+                        // ...but align the pointer
+                        const alignment = Type.fromInterned(uav.orig_ty).ptrAlignment(zcu);
+                        return .{ .immediate = alignment.forward(undef_ptr_bits) };
+                    },
+
+                    else => {},
+                };
             },
         },
         .int => {

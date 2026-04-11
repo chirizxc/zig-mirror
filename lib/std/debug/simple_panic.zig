@@ -127,6 +127,6 @@ pub fn noreturnReturned() noreturn {
     call("'noreturn' function returned", null);
 }
 
-pub fn corruptRestrictedPointer() noreturn {
-    call("corrupt restricted pointer value", null);
+pub fn corruptRestrictedValue() noreturn {
+    call("corrupt restricted value", null);
 }

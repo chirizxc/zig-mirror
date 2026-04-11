@@ -1385,8 +1385,8 @@ fn mergeNeededRestricted(
     for (new.keys()) |restricted_key| {
         const restricted_ty = switch (ip.indexToKey(restricted_key)) {
             else => unreachable,
-            .restricted_ptr_type => restricted_key,
-            .ptr => |ptr| ptr.ty,
+            .restricted_type => restricted_key,
+            .restricted_value => |restricted_value| restricted_value.ty,
         };
         const gop = global.getOrPutAssumeCapacity(restricted_ty);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
