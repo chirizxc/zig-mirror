@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - master
+      - 0.16.x
   workflow_dispatch:
 
 # This cancels older workflow runs on pull requests while ensuring that there
