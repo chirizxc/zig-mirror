@@ -289,7 +289,7 @@ pub fn resolveStructLayout(sema: *Sema, struct_ty: Type) CompileError!void {
         assert(!field_ty.isGenericPoison());
         const field_ty_src = block.src(.{ .container_field_type = @intCast(field_index) });
         try sema.ensureLayoutResolved(field_ty, field_ty_src, .field);
-        if (field_ty.zigTypeTag(zcu) == .@"opaque") {
+        if (ip.isOpaqueType(field_ty.toIntern())) {
             return sema.failWithOwnedErrorMsg(&block, msg: {
                 const msg = try sema.errMsg(field_ty_src, "cannot directly embed opaque type '{f}' in struct", .{field_ty.fmt(pt)});
                 errdefer msg.destroy(gpa);

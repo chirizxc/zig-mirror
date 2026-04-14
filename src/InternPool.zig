@@ -11913,23 +11913,29 @@ pub fn aggregateTypeLenIncludingSentinel(ip: *const InternPool, ty: Index) u64 {
 }
 
 pub fn funcTypeReturnType(ip: *const InternPool, ty: Index) Index {
-    const unwrapped_ty = ty.unwrap(ip);
-    const ty_extra = unwrapped_ty.getExtra(ip);
-    const ty_item = unwrapped_ty.getItem(ip);
-    const child_extra, const child_item = switch (ty_item.tag) {
-        .type_pointer => child: {
-            const child_index: Index = @enumFromInt(ty_extra.view().items(.@"0")[
-                ty_item.data + std.meta.fieldIndex(Tag.TypePointer, "child").?
-            ]);
-            const unwrapped_child = child_index.unwrap(ip);
-            break :child .{ unwrapped_child.getExtra(ip), unwrapped_child.getItem(ip) };
-        },
-        .type_function => .{ ty_extra, ty_item },
-        else => unreachable,
+    var ty_item, var ty_extra = unwrapped: {
+        const unwrapped_ty = ty.unwrap(ip);
+        break :unwrapped .{ unwrapped_ty.getItem(ip), unwrapped_ty.getExtra(ip) };
     };
-    assert(child_item.tag == .type_function);
-    return @enumFromInt(child_extra.view().items(.@"0")[
-        child_item.data + std.meta.fieldIndex(Tag.TypeFunction, "return_type").?
+    if (ty_item.tag == .type_restricted) {
+        const unrestricted_ty: Index = @enumFromInt(ty_extra.view().items(.@"0")[
+            ty_item.data + std.meta.fieldIndex(Tag.TypeRestricted, "unrestricted_type").?
+        ]);
+        const unwrapped_ty = unrestricted_ty.unwrap(ip);
+        ty_item = unwrapped_ty.getItem(ip);
+        ty_extra = unwrapped_ty.getExtra(ip);
+    }
+    if (ty_item.tag == .type_pointer) {
+        const child_ty: Index = @enumFromInt(ty_extra.view().items(.@"0")[
+            ty_item.data + std.meta.fieldIndex(Tag.TypePointer, "child").?
+        ]);
+        const unwrapped_ty = child_ty.unwrap(ip);
+        ty_item = unwrapped_ty.getItem(ip);
+        ty_extra = unwrapped_ty.getExtra(ip);
+    }
+    assert(ty_item.tag == .type_function);
+    return @enumFromInt(ty_extra.view().items(.@"0")[
+        ty_item.data + std.meta.fieldIndex(Tag.TypeFunction, "return_type").?
     ]);
 }
 

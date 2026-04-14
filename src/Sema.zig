@@ -6274,16 +6274,17 @@ fn checkCallArgumentCount(
     const pt = sema.pt;
     const zcu = pt.zcu;
     const func_ty: Type = func_ty: {
-        switch (callee_ty.zigTypeTag(zcu)) {
-            .@"fn" => break :func_ty callee_ty,
+        const unrestricted_callee_ty = callee_ty.unrestrictedType(zcu) orelse callee_ty;
+        switch (unrestricted_callee_ty.zigTypeTag(zcu)) {
+            .@"fn" => break :func_ty unrestricted_callee_ty,
             .pointer => {
-                const ptr_info = callee_ty.ptrInfo(zcu);
+                const ptr_info = unrestricted_callee_ty.ptrInfo(zcu);
                 if (ptr_info.flags.size == .one and Type.fromInterned(ptr_info.child).zigTypeTag(zcu) == .@"fn") {
                     break :func_ty .fromInterned(ptr_info.child);
                 }
             },
             .optional => {
-                const opt_child = callee_ty.optionalChild(zcu);
+                const opt_child = unrestricted_callee_ty.optionalChild(zcu);
                 if (opt_child.zigTypeTag(zcu) == .@"fn" or (opt_child.isSinglePointer(zcu) and
                     opt_child.childType(zcu).zigTypeTag(zcu) == .@"fn"))
                 {
@@ -7012,13 +7013,21 @@ fn analyzeCall(
             break :func .{ Air.internedToRef(func_instance), runtime_args.items };
         };
 
-        ref_func: {
-            const runtime_func_val = sema.resolveValue(runtime_func) orelse break :ref_func;
-            if (!ip.isFuncBody(runtime_func_val.toIntern())) break :ref_func;
-            const orig_fn_index = ip.unwrapCoercedFunc(runtime_func_val.toIntern());
-            try sema.addReferenceEntry(block, call_src, .wrap(.{ .func = orig_fn_index }));
-            try zcu.ensureFuncBodyAnalysisQueued(orig_fn_index);
-        }
+        const unrestricted_runtime_func: Air.Inst.Ref = if (sema.resolveValue(runtime_func)) |runtime_func_val| unrestricted_runtime_func: {
+            const unrestricted_runtime_func_val = switch (ip.indexToKey(runtime_func_val.toIntern())) {
+                else => runtime_func_val.toIntern(),
+                .restricted_value => |restricted_value| restricted_value.unrestricted_value,
+            };
+            if (ip.isFuncBody(unrestricted_runtime_func_val)) {
+                const orig_fn_index = ip.unwrapCoercedFunc(unrestricted_runtime_func_val);
+                try sema.addReferenceEntry(block, call_src, .wrap(.{ .func = orig_fn_index }));
+                try zcu.ensureFuncBodyAnalysisQueued(orig_fn_index);
+            }
+            break :unrestricted_runtime_func .fromIntern(unrestricted_runtime_func_val);
+        } else if (sema.typeOf(runtime_func).unrestrictedType(zcu)) |unrestricted_ty|
+            try sema.unwrapRestricted(block, unrestricted_ty, runtime_func, func_src)
+        else
+            runtime_func;
 
         const call_tag: Air.Inst.Tag = switch (modifier) {
             .auto, .no_suspend => .call,
@@ -7035,7 +7044,7 @@ fn analyzeCall(
         const call_ref = try block.addInst(.{
             .tag = call_tag,
             .data = .{ .pl_op = .{
-                .operand = runtime_func,
+                .operand = unrestricted_runtime_func,
                 .payload = sema.addExtraAssumeCapacity(Air.Call{
                     .args_len = @intCast(runtime_args.len),
                 }),
@@ -7050,10 +7059,10 @@ fn analyzeCall(
         }
 
         if (call_tag == .call_always_tail) {
-            const func_or_ptr_ty = sema.typeOf(runtime_func);
-            const runtime_func_ty = switch (func_or_ptr_ty.zigTypeTag(zcu)) {
-                .@"fn" => func_or_ptr_ty,
-                .pointer => func_or_ptr_ty.childType(zcu),
+            const unrestricted_runtime_func_ty = sema.typeOf(unrestricted_runtime_func);
+            const runtime_func_ty = switch (unrestricted_runtime_func_ty.zigTypeTag(zcu)) {
+                .@"fn" => unrestricted_runtime_func_ty,
+                .pointer => unrestricted_runtime_func_ty.childType(zcu),
                 else => unreachable,
             };
             const result = sema.coerceExtra(block, sema.fn_ret_ty, call_ref, call_src, .{ .is_ret = true }) catch |err| switch (err) {
@@ -9129,11 +9138,8 @@ fn analyzeAs(
     const zcu = pt.zcu;
     const operand = sema.resolveInst(zir_operand);
     const dest_ty = try sema.resolveTypeOrPoison(block, src, zir_dest_type) orelse return operand;
-    switch (dest_ty.zigTypeTag(zcu)) {
-        .@"opaque" => return sema.fail(block, src, "cannot cast to opaque type '{f}'", .{dest_ty.fmt(pt)}),
-        .noreturn => return sema.fail(block, src, "cannot cast to noreturn", .{}),
-        else => {},
-    }
+    if (dest_ty.toIntern() == .noreturn_type) return sema.fail(block, src, "cannot cast to noreturn", .{});
+    if (zcu.intern_pool.isOpaqueType(dest_ty.toIntern())) return sema.fail(block, src, "cannot cast to opaque type '{f}'", .{dest_ty.fmt(pt)});
 
     const is_ret = if (zir_dest_type.toIndex()) |ptr_index|
         sema.code.instructions.items(.tag)[@intFromEnum(ptr_index)] == .ret_type
