@@ -58,7 +58,7 @@ pub const VTable = struct {
     /// a unit of concurrency has been assigned to the returned task.
     ///
     /// Thread-safe.
-    async: *const fn (
+    async: @Restricted(*const fn (
         /// Corresponds to `Io.userdata`.
         userdata: ?*anyopaque,
         /// The pointer of this slice is an "eager" result value.
@@ -69,10 +69,10 @@ pub const VTable = struct {
         /// Copied and then passed to `start`.
         context: []const u8,
         context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
-    ) ?*AnyFuture,
+        start: AnyFuture.Start,
+    ) ?*AnyFuture),
     /// Thread-safe.
-    concurrent: *const fn (
+    concurrent: @Restricted(*const fn (
         /// Corresponds to `Io.userdata`.
         userdata: ?*anyopaque,
         result_len: usize,
@@ -80,12 +80,12 @@ pub const VTable = struct {
         /// Copied and then passed to `start`.
         context: []const u8,
         context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque, result: *anyopaque) void,
-    ) ConcurrentError!*AnyFuture,
+        start: AnyFuture.Start,
+    ) ConcurrentError!*AnyFuture),
     /// This function is only called when `async` returns a non-null value.
     ///
     /// Thread-safe.
-    await: *const fn (
+    await: @Restricted(*const fn (
         /// Corresponds to `Io.userdata`.
         userdata: ?*anyopaque,
         /// The same value that was returned from `async`.
@@ -94,13 +94,13 @@ pub const VTable = struct {
         /// The length is equal to size in bytes of result type.
         result: []u8,
         result_alignment: std.mem.Alignment,
-    ) void,
+    ) void),
     /// Equivalent to `await` but initiates cancel request.
     ///
     /// This function is only called when `async` returns a non-null value.
     ///
     /// Thread-safe.
-    cancel: *const fn (
+    cancel: @Restricted(*const fn (
         /// Corresponds to `Io.userdata`.
         userdata: ?*anyopaque,
         /// The same value that was returned from `async`.
@@ -109,14 +109,14 @@ pub const VTable = struct {
         /// The length is equal to size in bytes of result type.
         result: []u8,
         result_alignment: std.mem.Alignment,
-    ) void,
+    ) void),
 
     /// When this function returns, implementation guarantees that `start` has
     /// either already been called, or a unit of concurrency has been assigned
     /// to the task of calling the function.
     ///
     /// Thread-safe.
-    groupAsync: *const fn (
+    groupAsync: @Restricted(*const fn (
         /// Corresponds to `Io.userdata`.
         userdata: ?*anyopaque,
         /// Owner of the spawned async task.
@@ -124,10 +124,10 @@ pub const VTable = struct {
         /// Copied and then passed to `start`.
         context: []const u8,
         context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque) void,
-    ) void,
+        start: Group.Start,
+    ) void),
     /// Thread-safe.
-    groupConcurrent: *const fn (
+    groupConcurrent: @Restricted(*const fn (
         /// Corresponds to `Io.userdata`.
         userdata: ?*anyopaque,
         /// Owner of the spawned async task.
@@ -135,124 +135,124 @@ pub const VTable = struct {
         /// Copied and then passed to `start`.
         context: []const u8,
         context_alignment: std.mem.Alignment,
-        start: *const fn (context: *const anyopaque) void,
-    ) ConcurrentError!void,
-    groupAwait: *const fn (?*anyopaque, *Group, token: *anyopaque) Cancelable!void,
-    groupCancel: *const fn (?*anyopaque, *Group, token: *anyopaque) void,
+        start: Group.Start,
+    ) ConcurrentError!void),
+    groupAwait: @Restricted(*const fn (?*anyopaque, *Group, token: *anyopaque) Cancelable!void),
+    groupCancel: @Restricted(*const fn (?*anyopaque, *Group, token: *anyopaque) void),
 
-    recancel: *const fn (?*anyopaque) void,
-    swapCancelProtection: *const fn (?*anyopaque, new: CancelProtection) CancelProtection,
-    checkCancel: *const fn (?*anyopaque) Cancelable!void,
+    recancel: @Restricted(*const fn (?*anyopaque) void),
+    swapCancelProtection: @Restricted(*const fn (?*anyopaque, new: CancelProtection) CancelProtection),
+    checkCancel: @Restricted(*const fn (?*anyopaque) Cancelable!void),
 
-    futexWait: *const fn (?*anyopaque, ptr: *const u32, expected: u32, Timeout) Cancelable!void,
-    futexWaitUncancelable: *const fn (?*anyopaque, ptr: *const u32, expected: u32) void,
-    futexWake: *const fn (?*anyopaque, ptr: *const u32, max_waiters: u32) void,
+    futexWait: @Restricted(*const fn (?*anyopaque, ptr: *const u32, expected: u32, Timeout) Cancelable!void),
+    futexWaitUncancelable: @Restricted(*const fn (?*anyopaque, ptr: *const u32, expected: u32) void),
+    futexWake: @Restricted(*const fn (?*anyopaque, ptr: *const u32, max_waiters: u32) void),
 
-    operate: *const fn (?*anyopaque, Operation) Cancelable!Operation.Result,
-    batchAwaitAsync: *const fn (?*anyopaque, *Batch) Cancelable!void,
-    batchAwaitConcurrent: *const fn (?*anyopaque, *Batch, Timeout) Batch.AwaitConcurrentError!void,
-    batchCancel: *const fn (?*anyopaque, *Batch) void,
+    operate: @Restricted(*const fn (?*anyopaque, Operation) Cancelable!Operation.Result),
+    batchAwaitAsync: @Restricted(*const fn (?*anyopaque, *Batch) Cancelable!void),
+    batchAwaitConcurrent: @Restricted(*const fn (?*anyopaque, *Batch, Timeout) Batch.AwaitConcurrentError!void),
+    batchCancel: @Restricted(*const fn (?*anyopaque, *Batch) void),
 
-    dirCreateDir: *const fn (?*anyopaque, Dir, []const u8, Dir.Permissions) Dir.CreateDirError!void,
-    dirCreateDirPath: *const fn (?*anyopaque, Dir, []const u8, Dir.Permissions) Dir.CreateDirPathError!Dir.CreatePathStatus,
-    dirCreateDirPathOpen: *const fn (?*anyopaque, Dir, []const u8, Dir.Permissions, Dir.OpenOptions) Dir.CreateDirPathOpenError!Dir,
-    dirOpenDir: *const fn (?*anyopaque, Dir, []const u8, Dir.OpenOptions) Dir.OpenError!Dir,
-    dirStat: *const fn (?*anyopaque, Dir) Dir.StatError!Dir.Stat,
-    dirStatFile: *const fn (?*anyopaque, Dir, []const u8, Dir.StatFileOptions) Dir.StatFileError!File.Stat,
-    dirAccess: *const fn (?*anyopaque, Dir, []const u8, Dir.AccessOptions) Dir.AccessError!void,
-    dirCreateFile: *const fn (?*anyopaque, Dir, []const u8, Dir.CreateFileOptions) File.OpenError!File,
-    dirCreateFileAtomic: *const fn (?*anyopaque, Dir, []const u8, Dir.CreateFileAtomicOptions) Dir.CreateFileAtomicError!File.Atomic,
-    dirOpenFile: *const fn (?*anyopaque, Dir, []const u8, Dir.OpenFileOptions) File.OpenError!File,
-    dirClose: *const fn (?*anyopaque, []const Dir) void,
-    dirRead: *const fn (?*anyopaque, *Dir.Reader, []Dir.Entry) Dir.Reader.Error!usize,
-    dirRealPath: *const fn (?*anyopaque, Dir, out_buffer: []u8) Dir.RealPathError!usize,
-    dirRealPathFile: *const fn (?*anyopaque, Dir, path_name: []const u8, out_buffer: []u8) Dir.RealPathFileError!usize,
-    dirDeleteFile: *const fn (?*anyopaque, Dir, []const u8) Dir.DeleteFileError!void,
-    dirDeleteDir: *const fn (?*anyopaque, Dir, []const u8) Dir.DeleteDirError!void,
-    dirRename: *const fn (?*anyopaque, old_dir: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8) Dir.RenameError!void,
-    dirRenamePreserve: *const fn (?*anyopaque, old_dir: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8) Dir.RenamePreserveError!void,
-    dirSymLink: *const fn (?*anyopaque, Dir, target_path: []const u8, sym_link_path: []const u8, Dir.SymLinkFlags) Dir.SymLinkError!void,
-    dirReadLink: *const fn (?*anyopaque, Dir, sub_path: []const u8, buffer: []u8) Dir.ReadLinkError!usize,
-    dirSetOwner: *const fn (?*anyopaque, Dir, ?File.Uid, ?File.Gid) Dir.SetOwnerError!void,
-    dirSetFileOwner: *const fn (?*anyopaque, Dir, []const u8, ?File.Uid, ?File.Gid, Dir.SetFileOwnerOptions) Dir.SetFileOwnerError!void,
-    dirSetPermissions: *const fn (?*anyopaque, Dir, Dir.Permissions) Dir.SetPermissionsError!void,
-    dirSetFilePermissions: *const fn (?*anyopaque, Dir, []const u8, File.Permissions, Dir.SetFilePermissionsOptions) Dir.SetFilePermissionsError!void,
-    dirSetTimestamps: *const fn (?*anyopaque, Dir, []const u8, Dir.SetTimestampsOptions) Dir.SetTimestampsError!void,
-    dirHardLink: *const fn (?*anyopaque, old_dir: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8, Dir.HardLinkOptions) Dir.HardLinkError!void,
+    dirCreateDir: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.Permissions) Dir.CreateDirError!void),
+    dirCreateDirPath: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.Permissions) Dir.CreateDirPathError!Dir.CreatePathStatus),
+    dirCreateDirPathOpen: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.Permissions, Dir.OpenOptions) Dir.CreateDirPathOpenError!Dir),
+    dirOpenDir: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.OpenOptions) Dir.OpenError!Dir),
+    dirStat: @Restricted(*const fn (?*anyopaque, Dir) Dir.StatError!Dir.Stat),
+    dirStatFile: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.StatFileOptions) Dir.StatFileError!File.Stat),
+    dirAccess: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.AccessOptions) Dir.AccessError!void),
+    dirCreateFile: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.CreateFileOptions) File.OpenError!File),
+    dirCreateFileAtomic: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.CreateFileAtomicOptions) Dir.CreateFileAtomicError!File.Atomic),
+    dirOpenFile: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.OpenFileOptions) File.OpenError!File),
+    dirClose: @Restricted(*const fn (?*anyopaque, []const Dir) void),
+    dirRead: @Restricted(*const fn (?*anyopaque, *Dir.Reader, []Dir.Entry) Dir.Reader.Error!usize),
+    dirRealPath: @Restricted(*const fn (?*anyopaque, Dir, out_buffer: []u8) Dir.RealPathError!usize),
+    dirRealPathFile: @Restricted(*const fn (?*anyopaque, Dir, path_name: []const u8, out_buffer: []u8) Dir.RealPathFileError!usize),
+    dirDeleteFile: @Restricted(*const fn (?*anyopaque, Dir, []const u8) Dir.DeleteFileError!void),
+    dirDeleteDir: @Restricted(*const fn (?*anyopaque, Dir, []const u8) Dir.DeleteDirError!void),
+    dirRename: @Restricted(*const fn (?*anyopaque, old_dir: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8) Dir.RenameError!void),
+    dirRenamePreserve: @Restricted(*const fn (?*anyopaque, old_dir: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8) Dir.RenamePreserveError!void),
+    dirSymLink: @Restricted(*const fn (?*anyopaque, Dir, target_path: []const u8, sym_link_path: []const u8, Dir.SymLinkFlags) Dir.SymLinkError!void),
+    dirReadLink: @Restricted(*const fn (?*anyopaque, Dir, sub_path: []const u8, buffer: []u8) Dir.ReadLinkError!usize),
+    dirSetOwner: @Restricted(*const fn (?*anyopaque, Dir, ?File.Uid, ?File.Gid) Dir.SetOwnerError!void),
+    dirSetFileOwner: @Restricted(*const fn (?*anyopaque, Dir, []const u8, ?File.Uid, ?File.Gid, Dir.SetFileOwnerOptions) Dir.SetFileOwnerError!void),
+    dirSetPermissions: @Restricted(*const fn (?*anyopaque, Dir, Dir.Permissions) Dir.SetPermissionsError!void),
+    dirSetFilePermissions: @Restricted(*const fn (?*anyopaque, Dir, []const u8, File.Permissions, Dir.SetFilePermissionsOptions) Dir.SetFilePermissionsError!void),
+    dirSetTimestamps: @Restricted(*const fn (?*anyopaque, Dir, []const u8, Dir.SetTimestampsOptions) Dir.SetTimestampsError!void),
+    dirHardLink: @Restricted(*const fn (?*anyopaque, old_dir: Dir, old_sub_path: []const u8, new_dir: Dir, new_sub_path: []const u8, Dir.HardLinkOptions) Dir.HardLinkError!void),
 
-    fileStat: *const fn (?*anyopaque, File) File.StatError!File.Stat,
-    fileLength: *const fn (?*anyopaque, File) File.LengthError!u64,
-    fileClose: *const fn (?*anyopaque, []const File) void,
-    fileWritePositional: *const fn (?*anyopaque, File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) File.WritePositionalError!usize,
-    fileWriteFileStreaming: *const fn (?*anyopaque, File, header: []const u8, *Io.File.Reader, Io.Limit) File.Writer.WriteFileError!usize,
-    fileWriteFilePositional: *const fn (?*anyopaque, File, header: []const u8, *Io.File.Reader, Io.Limit, offset: u64) File.WriteFilePositionalError!usize,
+    fileStat: @Restricted(*const fn (?*anyopaque, File) File.StatError!File.Stat),
+    fileLength: @Restricted(*const fn (?*anyopaque, File) File.LengthError!u64),
+    fileClose: @Restricted(*const fn (?*anyopaque, []const File) void),
+    fileWritePositional: @Restricted(*const fn (?*anyopaque, File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) File.WritePositionalError!usize),
+    fileWriteFileStreaming: @Restricted(*const fn (?*anyopaque, File, header: []const u8, *Io.File.Reader, Io.Limit) File.Writer.WriteFileError!usize),
+    fileWriteFilePositional: @Restricted(*const fn (?*anyopaque, File, header: []const u8, *Io.File.Reader, Io.Limit, offset: u64) File.WriteFilePositionalError!usize),
     /// Returns 0 if reading at or past the end.
-    fileReadPositional: *const fn (?*anyopaque, File, data: []const []u8, offset: u64) File.ReadPositionalError!usize,
-    fileSeekBy: *const fn (?*anyopaque, File, relative_offset: i64) File.SeekError!void,
-    fileSeekTo: *const fn (?*anyopaque, File, absolute_offset: u64) File.SeekError!void,
-    fileSync: *const fn (?*anyopaque, File) File.SyncError!void,
-    fileIsTty: *const fn (?*anyopaque, File) Cancelable!bool,
-    fileEnableAnsiEscapeCodes: *const fn (?*anyopaque, File) File.EnableAnsiEscapeCodesError!void,
-    fileSupportsAnsiEscapeCodes: *const fn (?*anyopaque, File) Cancelable!bool,
-    fileSetLength: *const fn (?*anyopaque, File, u64) File.SetLengthError!void,
-    fileSetOwner: *const fn (?*anyopaque, File, ?File.Uid, ?File.Gid) File.SetOwnerError!void,
-    fileSetPermissions: *const fn (?*anyopaque, File, File.Permissions) File.SetPermissionsError!void,
-    fileSetTimestamps: *const fn (?*anyopaque, File, File.SetTimestampsOptions) File.SetTimestampsError!void,
-    fileLock: *const fn (?*anyopaque, File, File.Lock) File.LockError!void,
-    fileTryLock: *const fn (?*anyopaque, File, File.Lock) File.LockError!bool,
-    fileUnlock: *const fn (?*anyopaque, File) void,
-    fileDowngradeLock: *const fn (?*anyopaque, File) File.DowngradeLockError!void,
-    fileRealPath: *const fn (?*anyopaque, File, out_buffer: []u8) File.RealPathError!usize,
-    fileHardLink: *const fn (?*anyopaque, File, Dir, []const u8, File.HardLinkOptions) File.HardLinkError!void,
+    fileReadPositional: @Restricted(*const fn (?*anyopaque, File, data: []const []u8, offset: u64) File.ReadPositionalError!usize),
+    fileSeekBy: @Restricted(*const fn (?*anyopaque, File, relative_offset: i64) File.SeekError!void),
+    fileSeekTo: @Restricted(*const fn (?*anyopaque, File, absolute_offset: u64) File.SeekError!void),
+    fileSync: @Restricted(*const fn (?*anyopaque, File) File.SyncError!void),
+    fileIsTty: @Restricted(*const fn (?*anyopaque, File) Cancelable!bool),
+    fileEnableAnsiEscapeCodes: @Restricted(*const fn (?*anyopaque, File) File.EnableAnsiEscapeCodesError!void),
+    fileSupportsAnsiEscapeCodes: @Restricted(*const fn (?*anyopaque, File) Cancelable!bool),
+    fileSetLength: @Restricted(*const fn (?*anyopaque, File, u64) File.SetLengthError!void),
+    fileSetOwner: @Restricted(*const fn (?*anyopaque, File, ?File.Uid, ?File.Gid) File.SetOwnerError!void),
+    fileSetPermissions: @Restricted(*const fn (?*anyopaque, File, File.Permissions) File.SetPermissionsError!void),
+    fileSetTimestamps: @Restricted(*const fn (?*anyopaque, File, File.SetTimestampsOptions) File.SetTimestampsError!void),
+    fileLock: @Restricted(*const fn (?*anyopaque, File, File.Lock) File.LockError!void),
+    fileTryLock: @Restricted(*const fn (?*anyopaque, File, File.Lock) File.LockError!bool),
+    fileUnlock: @Restricted(*const fn (?*anyopaque, File) void),
+    fileDowngradeLock: @Restricted(*const fn (?*anyopaque, File) File.DowngradeLockError!void),
+    fileRealPath: @Restricted(*const fn (?*anyopaque, File, out_buffer: []u8) File.RealPathError!usize),
+    fileHardLink: @Restricted(*const fn (?*anyopaque, File, Dir, []const u8, File.HardLinkOptions) File.HardLinkError!void),
 
-    fileMemoryMapCreate: *const fn (?*anyopaque, File, File.MemoryMap.CreateOptions) File.MemoryMap.CreateError!File.MemoryMap,
-    fileMemoryMapDestroy: *const fn (?*anyopaque, *File.MemoryMap) void,
-    fileMemoryMapSetLength: *const fn (?*anyopaque, *File.MemoryMap, usize) File.MemoryMap.SetLengthError!void,
-    fileMemoryMapRead: *const fn (?*anyopaque, *File.MemoryMap) File.ReadPositionalError!void,
-    fileMemoryMapWrite: *const fn (?*anyopaque, *File.MemoryMap) File.WritePositionalError!void,
+    fileMemoryMapCreate: @Restricted(*const fn (?*anyopaque, File, File.MemoryMap.CreateOptions) File.MemoryMap.CreateError!File.MemoryMap),
+    fileMemoryMapDestroy: @Restricted(*const fn (?*anyopaque, *File.MemoryMap) void),
+    fileMemoryMapSetLength: @Restricted(*const fn (?*anyopaque, *File.MemoryMap, usize) File.MemoryMap.SetLengthError!void),
+    fileMemoryMapRead: @Restricted(*const fn (?*anyopaque, *File.MemoryMap) File.ReadPositionalError!void),
+    fileMemoryMapWrite: @Restricted(*const fn (?*anyopaque, *File.MemoryMap) File.WritePositionalError!void),
 
-    processExecutableOpen: *const fn (?*anyopaque, Dir.OpenFileOptions) std.process.OpenExecutableError!File,
-    processExecutablePath: *const fn (?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize,
-    lockStderr: *const fn (?*anyopaque, ?Terminal.Mode) Cancelable!LockedStderr,
-    tryLockStderr: *const fn (?*anyopaque, ?Terminal.Mode) Cancelable!?LockedStderr,
-    unlockStderr: *const fn (?*anyopaque) void,
-    processCurrentPath: *const fn (?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize,
-    processSetCurrentDir: *const fn (?*anyopaque, Dir) std.process.SetCurrentDirError!void,
-    processSetCurrentPath: *const fn (?*anyopaque, []const u8) std.process.SetCurrentPathError!void,
-    processReplace: *const fn (?*anyopaque, std.process.ReplaceOptions) std.process.ReplaceError,
-    processReplacePath: *const fn (?*anyopaque, Dir, std.process.ReplaceOptions) std.process.ReplaceError,
-    processSpawn: *const fn (?*anyopaque, std.process.SpawnOptions) std.process.SpawnError!std.process.Child,
-    processSpawnPath: *const fn (?*anyopaque, Dir, std.process.SpawnOptions) std.process.SpawnError!std.process.Child,
-    childWait: *const fn (?*anyopaque, *std.process.Child) std.process.Child.WaitError!std.process.Child.Term,
-    childKill: *const fn (?*anyopaque, *std.process.Child) void,
+    processExecutableOpen: @Restricted(*const fn (?*anyopaque, Dir.OpenFileOptions) std.process.OpenExecutableError!File),
+    processExecutablePath: @Restricted(*const fn (?*anyopaque, buffer: []u8) std.process.ExecutablePathError!usize),
+    lockStderr: @Restricted(*const fn (?*anyopaque, ?Terminal.Mode) Cancelable!LockedStderr),
+    tryLockStderr: @Restricted(*const fn (?*anyopaque, ?Terminal.Mode) Cancelable!?LockedStderr),
+    unlockStderr: @Restricted(*const fn (?*anyopaque) void),
+    processCurrentPath: @Restricted(*const fn (?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize),
+    processSetCurrentDir: @Restricted(*const fn (?*anyopaque, Dir) std.process.SetCurrentDirError!void),
+    processSetCurrentPath: @Restricted(*const fn (?*anyopaque, []const u8) std.process.SetCurrentPathError!void),
+    processReplace: @Restricted(*const fn (?*anyopaque, std.process.ReplaceOptions) std.process.ReplaceError),
+    processReplacePath: @Restricted(*const fn (?*anyopaque, Dir, std.process.ReplaceOptions) std.process.ReplaceError),
+    processSpawn: @Restricted(*const fn (?*anyopaque, std.process.SpawnOptions) std.process.SpawnError!std.process.Child),
+    processSpawnPath: @Restricted(*const fn (?*anyopaque, Dir, std.process.SpawnOptions) std.process.SpawnError!std.process.Child),
+    childWait: @Restricted(*const fn (?*anyopaque, *std.process.Child) std.process.Child.WaitError!std.process.Child.Term),
+    childKill: @Restricted(*const fn (?*anyopaque, *std.process.Child) void),
 
-    progressParentFile: *const fn (?*anyopaque) std.Progress.ParentFileError!File,
+    progressParentFile: @Restricted(*const fn (?*anyopaque) std.Progress.ParentFileError!File),
 
-    now: *const fn (?*anyopaque, Clock) Timestamp,
-    clockResolution: *const fn (?*anyopaque, Clock) Clock.ResolutionError!Duration,
-    sleep: *const fn (?*anyopaque, Timeout) Cancelable!void,
+    now: @Restricted(*const fn (?*anyopaque, Clock) Timestamp),
+    clockResolution: @Restricted(*const fn (?*anyopaque, Clock) Clock.ResolutionError!Duration),
+    sleep: @Restricted(*const fn (?*anyopaque, Timeout) Cancelable!void),
 
-    random: *const fn (?*anyopaque, buffer: []u8) void,
-    randomSecure: *const fn (?*anyopaque, buffer: []u8) RandomSecureError!void,
+    random: @Restricted(*const fn (?*anyopaque, buffer: []u8) void),
+    randomSecure: @Restricted(*const fn (?*anyopaque, buffer: []u8) RandomSecureError!void),
 
-    netListenIp: *const fn (?*anyopaque, address: *const net.IpAddress, net.IpAddress.ListenOptions) net.IpAddress.ListenError!net.Socket,
-    netAccept: *const fn (?*anyopaque, server: net.Socket.Handle, options: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket,
-    netBindIp: *const fn (?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket,
-    netConnectIp: *const fn (?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket,
-    netListenUnix: *const fn (?*anyopaque, *const net.UnixAddress, net.UnixAddress.ListenOptions) net.UnixAddress.ListenError!net.Socket.Handle,
-    netConnectUnix: *const fn (?*anyopaque, *const net.UnixAddress) net.UnixAddress.ConnectError!net.Socket.Handle,
-    netSocketCreatePair: *const fn (?*anyopaque, net.Socket.CreatePairOptions) net.Socket.CreatePairError![2]net.Socket,
-    netSend: *const fn (?*anyopaque, net.Socket.Handle, []net.OutgoingMessage, net.SendFlags) struct { ?net.Socket.SendError, usize },
-    netWrite: *const fn (?*anyopaque, dest: net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) net.Stream.Writer.Error!usize,
-    netWriteFile: *const fn (?*anyopaque, net.Socket.Handle, header: []const u8, *Io.File.Reader, Io.Limit) net.Stream.Writer.WriteFileError!usize,
-    netClose: *const fn (?*anyopaque, handle: []const net.Socket.Handle) void,
-    netShutdown: *const fn (?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) net.ShutdownError!void,
-    netInterfaceNameResolve: *const fn (?*anyopaque, *const net.Interface.Name) net.Interface.Name.ResolveError!net.Interface,
-    netInterfaceName: *const fn (?*anyopaque, net.Interface) net.Interface.NameError!net.Interface.Name,
-    netLookup: *const fn (?*anyopaque, net.HostName, *Queue(net.HostName.LookupResult), net.HostName.LookupOptions) net.HostName.LookupError!void,
+    netListenIp: @Restricted(*const fn (?*anyopaque, address: *const net.IpAddress, net.IpAddress.ListenOptions) net.IpAddress.ListenError!net.Socket),
+    netAccept: @Restricted(*const fn (?*anyopaque, server: net.Socket.Handle, options: net.Server.AcceptOptions) net.Server.AcceptError!net.Socket),
+    netBindIp: @Restricted(*const fn (?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.BindOptions) net.IpAddress.BindError!net.Socket),
+    netConnectIp: @Restricted(*const fn (?*anyopaque, address: *const net.IpAddress, options: net.IpAddress.ConnectOptions) net.IpAddress.ConnectError!net.Socket),
+    netListenUnix: @Restricted(*const fn (?*anyopaque, *const net.UnixAddress, net.UnixAddress.ListenOptions) net.UnixAddress.ListenError!net.Socket.Handle),
+    netConnectUnix: @Restricted(*const fn (?*anyopaque, *const net.UnixAddress) net.UnixAddress.ConnectError!net.Socket.Handle),
+    netSocketCreatePair: @Restricted(*const fn (?*anyopaque, net.Socket.CreatePairOptions) net.Socket.CreatePairError![2]net.Socket),
+    netSend: @Restricted(*const fn (?*anyopaque, net.Socket.Handle, []net.OutgoingMessage, net.SendFlags) struct { ?net.Socket.SendError, usize }),
+    netWrite: @Restricted(*const fn (?*anyopaque, dest: net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) net.Stream.Writer.Error!usize),
+    netWriteFile: @Restricted(*const fn (?*anyopaque, net.Socket.Handle, header: []const u8, *Io.File.Reader, Io.Limit) net.Stream.Writer.WriteFileError!usize),
+    netClose: @Restricted(*const fn (?*anyopaque, handle: []const net.Socket.Handle) void),
+    netShutdown: @Restricted(*const fn (?*anyopaque, handle: net.Socket.Handle, how: net.ShutdownHow) net.ShutdownError!void),
+    netInterfaceNameResolve: @Restricted(*const fn (?*anyopaque, *const net.Interface.Name) net.Interface.Name.ResolveError!net.Interface),
+    netInterfaceName: @Restricted(*const fn (?*anyopaque, net.Interface) net.Interface.NameError!net.Interface.Name),
+    netLookup: @Restricted(*const fn (?*anyopaque, net.HostName, *Queue(net.HostName.LookupResult), net.HostName.LookupOptions) net.HostName.LookupError!void),
 };
 
-pub const Operation = union(enum) {
+pub const Operation = union(@Restricted(Tag)) {
     file_read_streaming: FileReadStreaming,
     file_write_streaming: FileWriteStreaming,
     /// On Windows this is NtDeviceIoControlFile. On POSIX this is ioctl. On
@@ -261,7 +261,13 @@ pub const Operation = union(enum) {
     net_receive: NetReceive,
     net_read: NetRead,
 
-    pub const Tag = @typeInfo(Operation).@"union".tag_type.?;
+    pub const Tag = enum {
+        file_read_streaming,
+        file_write_streaming,
+        device_io_control,
+        net_receive,
+        net_read,
+    };
 
     /// May return 0 reads which is different than `error.EndOfStream`.
     pub const FileReadStreaming = struct {
@@ -1187,7 +1193,9 @@ pub const Timeout = union(enum) {
     }
 };
 
-pub const AnyFuture = opaque {};
+pub const AnyFuture = opaque {
+    pub const Start = @Restricted(*const fn (context: *const anyopaque, result: *anyopaque) void);
+};
 
 pub fn Future(Result: type) type {
     return struct {
@@ -1242,6 +1250,8 @@ pub const Group = struct {
     state: usize,
 
     pub const init: Group = .{ .token = .init(null), .state = 0 };
+
+    pub const Start = @Restricted(*const fn (context: *const anyopaque) void);
 
     /// Equivalent to `Io.async`, except the task is spawned in this `Group`
     /// instead of becoming associated with a `Future`.
@@ -2711,7 +2721,7 @@ pub fn noCrashHandler(userdata: ?*anyopaque) void {
     _ = userdata;
 }
 
-pub fn noAsync(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*AnyFuture {
+pub fn noAsync(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: AnyFuture.Start) ?*AnyFuture {
     _ = userdata;
     _ = result_alignment;
     _ = context_alignment;
@@ -2725,7 +2735,7 @@ pub fn failingConcurrent(
     result_alignment: std.mem.Alignment,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: AnyFuture.Start,
 ) ConcurrentError!*AnyFuture {
     _ = userdata;
     _ = result_len;
@@ -2767,7 +2777,7 @@ pub fn noGroupAsync(
     group: *Group,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque) void,
+    start: Group.Start,
 ) void {
     _ = userdata;
     _ = group;
@@ -2780,7 +2790,7 @@ pub fn failingGroupConcurrent(
     group: *Group,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque) void,
+    start: Group.Start,
 ) ConcurrentError!void {
     _ = userdata;
     _ = group;

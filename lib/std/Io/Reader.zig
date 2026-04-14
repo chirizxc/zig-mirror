@@ -43,7 +43,7 @@ pub const VTable = struct {
     /// choose to store data in `buffer`, modifying `seek` and `end`
     /// accordingly. Implementations are encouraged to take advantage of
     /// this if it simplifies the logic.
-    stream: *const fn (r: *Reader, w: *Writer, limit: Limit) StreamError!usize,
+    stream: @Restricted(*const fn (r: *Reader, w: *Writer, limit: Limit) StreamError!usize),
 
     /// Consumes bytes from the internally tracked stream position without
     /// providing access to them.
@@ -64,7 +64,7 @@ pub const VTable = struct {
     /// data.
     ///
     /// This function is only called when `buffer` is empty.
-    discard: *const fn (r: *Reader, limit: Limit) Error!usize = defaultDiscard,
+    discard: @Restricted(*const fn (r: *Reader, limit: Limit) Error!usize) = defaultDiscard,
 
     /// Returns number of bytes written to `data`.
     ///
@@ -84,7 +84,7 @@ pub const VTable = struct {
     ///
     /// The default implementation calls `stream` with either `data[0]` or
     /// `Reader.buffer`, whichever is bigger.
-    readVec: *const fn (r: *Reader, data: [][]u8) Error!usize = defaultReadVec,
+    readVec: @Restricted(*const fn (r: *Reader, data: [][]u8) Error!usize) = defaultReadVec,
 
     /// Ensures `capacity` data can be buffered without rebasing.
     ///
@@ -96,7 +96,7 @@ pub const VTable = struct {
     ///
     /// The default implementation moves buffered data to the start of
     /// `buffer`, setting `seek` to zero, and cannot fail.
-    rebase: *const fn (r: *Reader, capacity: usize) RebaseError!void = defaultRebase,
+    rebase: @Restricted(*const fn (r: *Reader, capacity: usize) RebaseError!void) = defaultRebase,
 };
 
 pub const StreamError = error{

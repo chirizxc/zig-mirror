@@ -43,7 +43,7 @@ pub const VTable = struct {
     /// Number of bytes returned may be zero, which does not indicate stream
     /// end. A subsequent call may return nonzero, or signal end of stream via
     /// `error.WriteFailed`.
-    drain: *const fn (w: *Writer, data: []const []const u8, splat: usize) Error!usize,
+    drain: @Restricted(*const fn (w: *Writer, data: []const []const u8, splat: usize) Error!usize),
 
     /// Copies contents from an open file to the logical sink. `buffer[0..end]`
     /// is consumed first, followed by `limit` bytes from `file_reader`.
@@ -60,14 +60,14 @@ pub const VTable = struct {
     ///
     /// `error.Unimplemented` indicates the callee cannot offer a more
     /// efficient implementation than the caller performing its own reads.
-    sendFile: *const fn (
+    sendFile: @Restricted(*const fn (
         w: *Writer,
         file_reader: *File.Reader,
         /// Maximum amount of bytes to read from the file. Implementations may
         /// assume that the file size does not exceed this amount. Data from
         /// `buffer` does not count towards this limit.
         limit: Limit,
-    ) FileError!usize = unimplementedSendFile,
+    ) FileError!usize) = unimplementedSendFile,
 
     /// Consumes all remaining buffer.
     ///
@@ -77,7 +77,7 @@ pub const VTable = struct {
     ///
     /// There may be subsequent calls to `drain` and `sendFile` after a `flush`
     /// operation.
-    flush: *const fn (w: *Writer) Error!void = defaultFlush,
+    flush: @Restricted(*const fn (w: *Writer) Error!void) = defaultFlush,
 
     /// Ensures `capacity` more bytes can be buffered without rebasing.
     ///
@@ -85,7 +85,7 @@ pub const VTable = struct {
     ///
     /// Only called when `capacity` bytes cannot fit into the unused capacity
     /// of `buffer`.
-    rebase: *const fn (w: *Writer, preserve: usize, capacity: usize) Error!void = defaultRebase,
+    rebase: @Restricted(*const fn (w: *Writer, preserve: usize, capacity: usize) Error!void) = defaultRebase,
 };
 
 pub const Error = error{

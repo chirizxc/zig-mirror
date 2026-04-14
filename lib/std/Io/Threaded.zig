@@ -449,7 +449,7 @@ const default_fn_align = switch (builtin.mode) {
 
 const Runnable = struct {
     node: std.SinglyLinkedList.Node,
-    startFn: *const fn (*Runnable, *Thread, *Threaded) void,
+    startFn: @Restricted(*const fn (*Runnable, *Thread, *Threaded) void),
 };
 
 const Group = struct {
@@ -484,7 +484,7 @@ const Group = struct {
     const Task = struct {
         runnable: Runnable,
         group: *Io.Group,
-        func: *const fn (context: *const anyopaque) void,
+        startFn: Io.Group.Start,
         context_alignment: Alignment,
         alloc_len: usize,
 
@@ -494,7 +494,7 @@ const Group = struct {
             group: Group,
             context: []const u8,
             context_alignment: Alignment,
-            func: *const fn (context: *const anyopaque) void,
+            startFn: Io.Group.Start,
         ) Allocator.Error!*Task {
             const max_context_misalignment = context_alignment.toByteUnits() -| @alignOf(Task);
             const worst_case_context_offset = context_alignment.forward(@sizeOf(Task) + max_context_misalignment);
@@ -509,7 +509,7 @@ const Group = struct {
                     .startFn = &start,
                 },
                 .group = group.ptr,
-                .func = func,
+                .startFn = startFn,
                 .context_alignment = context_alignment,
                 .alloc_len = alloc_len,
             };
@@ -549,7 +549,7 @@ const Group = struct {
                 }, .monotonic);
             }
 
-            task.func(task.contextPointer());
+            task.startFn(task.contextPointer());
 
             thread.status.store(.{ .cancelation = .none, .awaitable = .null }, .monotonic);
             const old_status = group.status().fetchSub(.{
@@ -631,7 +631,7 @@ const Group = struct {
 /// 2. result
 const Future = struct {
     runnable: Runnable,
-    func: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    startFn: Io.AnyFuture.Start,
     status: std.atomic.Value(Status),
     /// On completion, increment this `u32` and do a futex wake on it.
     awaiter: *std.atomic.Value(u32),
@@ -666,7 +666,7 @@ const Future = struct {
         result_alignment: Alignment,
         context: []const u8,
         context_alignment: Alignment,
-        func: *const fn (context: *const anyopaque, result: *anyopaque) void,
+        startFn: Io.AnyFuture.Start,
     ) Allocator.Error!*Future {
         const max_context_misalignment = context_alignment.toByteUnits() -| @alignOf(Future);
         const worst_case_context_offset = context_alignment.forward(@sizeOf(Future) + max_context_misalignment);
@@ -684,7 +684,7 @@ const Future = struct {
                 .node = undefined,
                 .startFn = &start,
             },
-            .func = func,
+            .startFn = startFn,
             .status = .init(.{
                 .tag = .pending,
                 .thread = .null,
@@ -738,7 +738,7 @@ const Future = struct {
             }
         }
 
-        future.func(future.contextPointer(), future.resultPointer());
+        future.startFn(future.contextPointer(), future.resultPointer());
 
         const had_acknowledged_cancel = switch (thread.status.load(.monotonic).cancelation) {
             .none, .canceling => false,
@@ -2073,7 +2073,7 @@ fn async(
     result_alignment: Alignment,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Io.AnyFuture.Start,
 ) ?*Io.AnyFuture {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     if (builtin.single_threaded) {
@@ -2129,7 +2129,7 @@ fn concurrent(
     result_alignment: Alignment,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Io.AnyFuture.Start,
 ) Io.ConcurrentError!*Io.AnyFuture {
     if (builtin.single_threaded) return error.ConcurrencyUnavailable;
 
@@ -2174,7 +2174,7 @@ fn groupAsync(
     type_erased: *Io.Group,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque) void,
+    start: Io.Group.Start,
 ) void {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     const g: Group = .{ .ptr = type_erased };
@@ -2224,10 +2224,7 @@ fn groupAsync(
     mutexUnlock(&t.mutex);
     condSignal(&t.cond);
 }
-fn groupAsyncEager(
-    start: *const fn (context: *const anyopaque) void,
-    context: *const anyopaque,
-) void {
+fn groupAsyncEager(start: Io.Group.Start, context: *const anyopaque) void {
     start(context);
 }
 
@@ -2236,7 +2233,7 @@ fn groupConcurrent(
     type_erased: *Io.Group,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque) void,
+    start: Io.Group.Start,
 ) Io.ConcurrentError!void {
     if (builtin.single_threaded) return error.ConcurrencyUnavailable;
 

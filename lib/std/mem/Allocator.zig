@@ -26,7 +26,7 @@ pub const VTable = struct {
     /// `ret_addr` is optionally provided as the first return address of the
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
-    alloc: *const fn (*anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8,
+    alloc: @Restricted(*const fn (*anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8),
 
     /// Attempt to expand or shrink memory in place.
     ///
@@ -45,7 +45,7 @@ pub const VTable = struct {
     /// `ret_addr` is optionally provided as the first return address of the
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
-    resize: *const fn (*anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) bool,
+    resize: @Restricted(*const fn (*anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) bool),
 
     /// Attempt to expand or shrink memory, allowing relocation.
     ///
@@ -66,7 +66,7 @@ pub const VTable = struct {
     /// `ret_addr` is optionally provided as the first return address of the
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
-    remap: *const fn (*anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) ?[*]u8,
+    remap: @Restricted(*const fn (*anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) ?[*]u8),
 
     /// Free and invalidate a region of memory.
     ///
@@ -78,7 +78,7 @@ pub const VTable = struct {
     /// `ret_addr` is optionally provided as the first return address of the
     /// allocation call stack. If the value is `0` it means no return address
     /// has been provided.
-    free: *const fn (*anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void,
+    free: @Restricted(*const fn (*anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void),
 };
 
 pub fn noAlloc(

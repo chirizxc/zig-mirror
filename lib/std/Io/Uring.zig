@@ -1375,7 +1375,7 @@ fn crashHandler(userdata: ?*anyopaque) void {
 const AsyncClosure = struct {
     evented: *Evented,
     fiber: *Fiber,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Io.AnyFuture.Start,
     result_align: Alignment,
 
     fn fromFiber(fiber: *Fiber) *AsyncClosure {
@@ -1431,8 +1431,8 @@ fn async(
     result_alignment: Alignment,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
-) ?*std.Io.AnyFuture {
+    start: Io.AnyFuture.Start,
+) ?*Io.AnyFuture {
     const ev: *Evented = @ptrCast(@alignCast(userdata));
     return concurrent(ev, result.len, result_alignment, context, context_alignment, start) catch {
         start(context.ptr, result.ptr);
@@ -1446,8 +1446,8 @@ fn concurrent(
     result_alignment: Alignment,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
-) Io.ConcurrentError!*std.Io.AnyFuture {
+    start: Io.AnyFuture.Start,
+) Io.ConcurrentError!*Io.AnyFuture {
     assert(result_alignment.compare(.lte, Fiber.max_result_align)); // TODO
     assert(context_alignment.compare(.lte, Fiber.max_context_align)); // TODO
     assert(result_len <= Fiber.max_result_size); // TODO
@@ -1510,7 +1510,7 @@ fn concurrent(
 
 fn await(
     userdata: ?*anyopaque,
-    future: *std.Io.AnyFuture,
+    future: *Io.AnyFuture,
     result: []u8,
     result_alignment: Alignment,
 ) void {
@@ -1524,7 +1524,7 @@ fn await(
 
 fn cancel(
     userdata: ?*anyopaque,
-    future: *std.Io.AnyFuture,
+    future: *Io.AnyFuture,
     result: []u8,
     result_alignment: Alignment,
 ) void {
@@ -1739,7 +1739,7 @@ const Group = struct {
         evented: *Evented,
         group: Group,
         fiber: *Fiber,
-        start: *const fn (context: *const anyopaque) void,
+        start: Group.Start,
 
         fn fromFiber(fiber: *Fiber) *Group.AsyncClosure {
             return @ptrFromInt(Fiber.max_context_align.max(.of(Group.AsyncClosure)).backward(
@@ -1797,7 +1797,7 @@ fn groupAsync(
     type_erased: *Io.Group,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque) void,
+    start: Group.Start,
 ) void {
     const ev: *Evented = @ptrCast(@alignCast(userdata));
     return groupConcurrent(ev, type_erased, context, context_alignment, start) catch {
@@ -1810,7 +1810,7 @@ fn groupConcurrent(
     type_erased: *Io.Group,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque) void,
+    start: Group.Start,
 ) Io.ConcurrentError!void {
     assert(context_alignment.compare(.lte, Fiber.max_context_align)); // TODO
     assert(context.len <= Fiber.max_context_size); // TODO

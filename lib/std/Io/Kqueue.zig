@@ -3,15 +3,15 @@ const builtin = @import("builtin");
 
 const std = @import("../std.zig");
 const Io = std.Io;
-const Dir = std.Io.Dir;
-const File = std.Io.File;
-const net = std.Io.net;
+const Dir = Io.Dir;
+const File = Io.File;
+const net = Io.net;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
-const IpAddress = std.Io.net.IpAddress;
-const errnoBug = std.Io.Threaded.errnoBug;
-const closeFd = std.Io.Threaded.closeFd;
+const IpAddress = Io.net.IpAddress;
+const errnoBug = Io.Threaded.errnoBug;
+const closeFd = Io.Threaded.closeFd;
 const posix = std.posix;
 const posixSocketModeProtocol = Io.Threaded.posixSocketModeProtocol;
 
@@ -577,7 +577,7 @@ fn fiberEntry() callconv(.naked) void {
 const AsyncClosure = struct {
     kqueue: *Kqueue,
     fiber: *Fiber,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Io.AnyFuture.Start,
     result_align: Alignment,
     already_awaited: bool,
 
@@ -669,7 +669,7 @@ fn async(
     result_alignment: std.mem.Alignment,
     context: []const u8,
     context_alignment: std.mem.Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Io.AnyFuture.Start,
 ) ?*Io.AnyFuture {
     return concurrent(userdata, result.len, result_alignment, context, context_alignment, start) catch {
         start(context.ptr, result.ptr);
@@ -683,7 +683,7 @@ fn concurrent(
     result_alignment: Alignment,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    start: Io.AnyFuture.Start,
 ) Io.ConcurrentError!*Io.AnyFuture {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     assert(result_alignment.compare(.lte, Fiber.max_result_align)); // TODO
@@ -767,7 +767,7 @@ fn groupAsync(
     type_erased: *Io.Group,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque) void,
+    start: Io.Group.Start,
 ) void {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;
@@ -783,7 +783,7 @@ fn groupConcurrent(
     type_erased: *Io.Group,
     context: []const u8,
     context_alignment: Alignment,
-    start: *const fn (context: *const anyopaque) void,
+    start: Io.Group.Start,
 ) Io.ConcurrentError!void {
     const k: *Kqueue = @ptrCast(@alignCast(userdata));
     _ = k;

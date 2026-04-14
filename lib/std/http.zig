@@ -772,7 +772,7 @@ pub const BodyWriter = struct {
     };
 
     pub fn isEliding(w: *const BodyWriter) bool {
-        return w.writer.vtable.drain == elidingDrain;
+        return @as(*const fn (*Writer, []const []const u8, usize) Writer.Error!usize, w.writer.vtable.drain) == elidingDrain;
     }
 
     /// Sends all buffered data across `BodyWriter.http_protocol_output`.
