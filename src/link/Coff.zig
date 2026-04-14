@@ -1912,6 +1912,7 @@ fn flushUav(
                 try coff.nodes.ensureUnusedCapacity(gpa, 1);
                 const sym = si.get(coff);
                 const ni = try coff.mf.addLastChildNode(gpa, sec_si.node(coff), .{
+                    .size = Type.fromInterned(zcu.intern_pool.typeOf(uav_val)).abiSize(zcu),
                     .alignment = uav_align.toStdMem(),
                     .moved = true,
                 });

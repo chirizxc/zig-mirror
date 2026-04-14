@@ -2981,10 +2981,7 @@ pub fn lowerUav(
         if (gop.found_existing) {
             gop.value_ptr.alignment = gop.value_ptr.alignment.max(uav_align);
         } else {
-            gop.value_ptr.* = .{
-                .alignment = uav_align,
-                .src_loc = src_loc,
-            };
+            gop.value_ptr.* = .{ .alignment = uav_align, .src_loc = src_loc };
             elf.const_prog_node.increaseEstimatedTotalItems(1);
         }
     }
@@ -3245,6 +3242,7 @@ fn flushUav(
                 try elf.nodes.ensureUnusedCapacity(gpa, 1);
                 const sec_si = elf.si.data;
                 const ni = try elf.mf.addLastChildNode(gpa, sec_si.node(elf), .{
+                    .size = Type.fromInterned(zcu.intern_pool.typeOf(uav_val)).abiSize(zcu),
                     .alignment = uav_align.toStdMem(),
                     .moved = true,
                 });

@@ -501,7 +501,11 @@ pub fn resolve(options: Options) ResolveError!Config {
         };
     };
 
-    const backend_supports_error_tracing = target_util.backendSupportsFeature(backend, options.incremental, .error_return_trace);
+    const backend_supports_error_tracing = target_util.backendSupportsFeature(.error_return_trace, .{
+        .backend = backend,
+        .incremental = options.incremental,
+        .use_new_linker = use_new_linker,
+    });
 
     const root_error_tracing = b: {
         if (options.root_error_tracing) |x| break :b x;

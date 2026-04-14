@@ -305,6 +305,8 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
         .errunion_payload_ptr_set,
         .wrap_errunion_payload,
         .wrap_errunion_err,
+        .unwrap_restricted,
+        .unwrap_restricted_safe,
         .struct_field_ptr_index_0,
         .struct_field_ptr_index_1,
         .struct_field_ptr_index_2,
@@ -653,28 +655,6 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
 
             try isel.analyzeUse(bin_op.lhs);
             try isel.analyzeUse(bin_op.rhs);
-
-            air_body_index += 1;
-            air_inst_index = air_body[air_body_index];
-            continue :air_tag air_tags[@intFromEnum(air_inst_index)];
-        },
-        .unwrap_restricted, .unwrap_restricted_safe => {
-            const ty_op = air_data[@intFromEnum(air_inst_index)].ty_op;
-
-            maybe_noop: {
-                switch (isel.air.typeOf(ty_op.operand, ip).restrictedRepr(zcu)) {
-                    .indirect => break :maybe_noop,
-                    .direct => {},
-                }
-                if (true) break :maybe_noop;
-                if (ty_op.operand.toIndex()) |src_air_inst_index| {
-                    if (isel.hints.get(src_air_inst_index)) |hint_vpsi| {
-                        try isel.hints.putNoClobber(gpa, air_inst_index, hint_vpsi);
-                    }
-                }
-            }
-            try isel.analyzeUse(ty_op.operand);
-            try isel.def_order.putNoClobber(gpa, air_inst_index, {});
 
             air_body_index += 1;
             air_inst_index = air_body[air_body_index];
@@ -5763,22 +5743,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
             if (isel.live_values.fetchRemove(air.inst_index)) |dst_vi| {
                 defer dst_vi.value.deref(isel);
                 const ty_op = air.data(air.inst_index).ty_op;
-                const unrestricted_ty = ty_op.ty.toType();
-                const restricted_ty = isel.air.typeOf(ty_op.operand, ip);
-                switch (restricted_ty.restrictedRepr(zcu)) {
-                    .indirect => {
-                        switch (air_tag) {
-                            else => unreachable,
-                            .unwrap_restricted => {},
-                            .unwrap_restricted_safe => {}, // TODO
-                        }
-                        const ptr_vi = try isel.use(ty_op.operand);
-                        const ptr_mat = try ptr_vi.matReg(isel);
-                        _ = try dst_vi.value.load(isel, unrestricted_ty, ptr_mat.ra, .{});
-                        try ptr_mat.finish(isel);
-                    },
-                    .direct => try dst_vi.value.move(isel, ty_op.operand),
-                }
+                _ = air_tag; // TODO
+                try dst_vi.value.move(isel, ty_op.operand);
             }
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
         },

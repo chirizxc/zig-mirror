@@ -722,7 +722,7 @@ pub const Object = struct {
         gop.value_ptr.* = .{
             .len = try o.builder.addVariable(
                 try o.builder.strtabStringFmt("{s}.len", .{ty_name}),
-                try o.lowerType(.usize),
+                .i32,
                 .default,
             ),
             .array = try o.builder.addVariable(
@@ -734,7 +734,7 @@ pub const Object = struct {
         };
         gop.value_ptr.len.setLinkage(.private, &o.builder);
         gop.value_ptr.len.setMutability(.constant, &o.builder);
-        gop.value_ptr.len.setAlignment(Type.ptrAbiAlignment(target).toLlvm(), &o.builder);
+        gop.value_ptr.len.setAlignment(.fromByteUnits(std.zig.target.intAlignment(target, 32)), &o.builder);
         gop.value_ptr.len.setUnnamedAddr(.unnamed_addr, &o.builder);
         gop.value_ptr.array.setLinkage(.private, &o.builder);
         gop.value_ptr.array.setMutability(.constant, &o.builder);
@@ -747,12 +747,9 @@ pub const Object = struct {
     fn genRestrictedDecls(o: *Object) Allocator.Error!void {
         for (o.restricted_map.values()) |restricted_decls| {
             const len = restricted_decls.values.count();
-            try restricted_decls.len.setInitializer(
-                try o.builder.intConst(restricted_decls.len.typeOf(&o.builder), len),
-                &o.builder,
-            );
+            try restricted_decls.len.setInitializer(try o.builder.intConst(.i32, len), &o.builder);
             try restricted_decls.array.setInitializer(switch (len) {
-                0 => try o.builder.structConst(try o.builder.structType(.normal, &.{}), &.{}),
+                0 => try o.builder.zeroInitConst(.i8), // ensure unique address
                 else => try o.builder.arrayConst(
                     try o.builder.arrayType(len, restricted_decls.values.values()[0].typeOf(&o.builder)),
                     restricted_decls.values.values(),
@@ -2027,7 +2024,7 @@ pub const Object = struct {
     fn lowerDebugType(
         o: *Object,
         pt: Zcu.PerThread,
-        start_ty: Type,
+        ty: Type,
         ty_fwd_ref: Builder.Metadata,
     ) Allocator.Error!Builder.Metadata {
         assert(!o.builder.strip);
@@ -2037,7 +2034,7 @@ pub const Object = struct {
         const target = zcu.getTarget();
         const ip = &zcu.intern_pool;
 
-        const name = try o.builder.metadataStringFmt("{f}", .{start_ty.fmt(pt)});
+        const name = try o.builder.metadataStringFmt("{f}", .{ty.fmt(pt)});
 
         // lldb cannot handle non-byte-sized types, so in the logic below, bit sizes are padded up.
         // For instance, `bool` is considered to be 8 bits, and `u60` is considered to be 64 bits.
@@ -2048,23 +2045,16 @@ pub const Object = struct {
         // handling for variants at all, and will never print fields in them, so I opted not to use
         // them for now.
 
-        const ty = if (start_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (start_ty.restrictedRepr(zcu)) {
-            .indirect => {
-                const ptr_size = Type.ptrAbiSize(zcu.getTarget());
-                const ptr_align = Type.ptrAbiAlignment(zcu.getTarget());
-                return o.builder.debugPointerType(
-                    name,
-                    null, // file
-                    o.debug_compile_unit.unwrap().?, // scope
-                    0, // line
-                    try o.getDebugType(pt, unrestricted_ty),
-                    ptr_size * 8,
-                    ptr_align.toByteUnits().? * 8,
-                    0, // offset
-                );
-            },
-            .direct => unrestricted_ty,
-        } else start_ty;
+        if (ip.isRestrictedType(ty.toIntern())) return o.builder.debugTypedefType(
+            name,
+            null, // file
+            o.debug_compile_unit.unwrap().?, // scope
+            0, // line
+            try o.getDebugType(pt, .u32),
+            ty.abiSize(zcu) * 8,
+            ty.abiAlignment(zcu).toByteUnits().? * 8,
+            0, // offset
+        );
 
         switch (ty.zigTypeTag(zcu)) {
             .void,
@@ -3223,10 +3213,7 @@ pub const Object = struct {
                     return o.builder.structType(.normal, fields[0..fields_len]);
                 },
                 .simple_type => unreachable,
-                .restricted_type => |restricted_type| switch (t.restrictedRepr(zcu)) {
-                    .indirect => .ptr,
-                    .direct => try o.lowerType(.fromInterned(restricted_type.unrestricted_type)),
-                },
+                .restricted_type => .i32,
                 .struct_type => {
                     if (o.type_map.get(t.toIntern())) |value| return value;
 
@@ -3997,20 +3984,11 @@ pub const Object = struct {
                 else
                     union_ty, vals[0..len]);
             },
-            .restricted_value => |restricted_value| switch (ty.restrictedRepr(zcu)) {
-                .indirect => {
-                    const restricted_decls = try o.getRestrictedDecls(ty);
-                    const gop = try restricted_decls.values.getOrPut(o.gpa, arg_val);
-                    if (!gop.found_existing) gop.value_ptr.* = try o.lowerValue(restricted_value.unrestricted_value);
-                    return o.builder.gepConst(
-                        .inbounds,
-                        gop.value_ptr.typeOf(&o.builder),
-                        restricted_decls.array.toConst(&o.builder),
-                        null,
-                        &.{try o.builder.intConst(.i64, gop.index)},
-                    );
-                },
-                .direct => try o.lowerValue(restricted_value.unrestricted_value),
+            .restricted_value => |restricted_value| {
+                const restricted_decls = try o.getRestrictedDecls(ty);
+                const gop = try restricted_decls.values.getOrPut(o.gpa, arg_val);
+                if (!gop.found_existing) gop.value_ptr.* = try o.lowerValue(restricted_value.unrestricted_value);
+                return o.builder.intConst(.i32, gop.index);
             },
             .memoized_call => unreachable,
         };

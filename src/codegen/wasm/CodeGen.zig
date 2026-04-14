@@ -6725,18 +6725,10 @@ fn airErrUnionPayloadPtrSet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void 
 }
 
 fn airUnwrapRestricted(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
-    const zcu = cg.pt.zcu;
     const ty_op = cg.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const operand = try cg.resolveInst(ty_op.operand);
-    const unrestricted_ty = ty_op.ty.toType();
-    const restricted_ty = cg.typeOf(ty_op.operand);
-    const result = result: switch (restricted_ty.restrictedRepr(zcu)) {
-        .indirect => {
-            _ = safety; // TODO
-            break :result try cg.load(operand, unrestricted_ty, 0);
-        },
-        .direct => cg.reuseOperand(ty_op.operand, operand),
-    };
+    _ = safety; // TODO
+    const result = cg.reuseOperand(ty_op.operand, operand); // TODO
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }
 

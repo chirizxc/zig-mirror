@@ -129,29 +129,27 @@ pub const CType = union(enum) {
 
         pub fn bits(int: Int, target: *const std.Target) u16 {
             return switch (int) {
-                // zig fmt: off
-            .char => target.cTypeBitSize(.char),
+                .char => target.cTypeBitSize(.char),
 
-            .@"unsigned short"     => target.cTypeBitSize(.ushort),
-            .@"unsigned int"       => target.cTypeBitSize(.uint),
-            .@"unsigned long"      => target.cTypeBitSize(.ulong),
-            .@"unsigned long long" => target.cTypeBitSize(.ulonglong),
+                .@"unsigned short" => target.cTypeBitSize(.ushort),
+                .@"unsigned int" => target.cTypeBitSize(.uint),
+                .@"unsigned long" => target.cTypeBitSize(.ulong),
+                .@"unsigned long long" => target.cTypeBitSize(.ulonglong),
 
-            .@"signed short"     => target.cTypeBitSize(.short),
-            .@"signed int"       => target.cTypeBitSize(.int),
-            .@"signed long"      => target.cTypeBitSize(.long),
-            .@"signed long long" => target.cTypeBitSize(.longlong),
+                .@"signed short" => target.cTypeBitSize(.short),
+                .@"signed int" => target.cTypeBitSize(.int),
+                .@"signed long" => target.cTypeBitSize(.long),
+                .@"signed long long" => target.cTypeBitSize(.longlong),
 
-            .uintptr_t, .intptr_t => target.ptrBitWidth(),
+                .uintptr_t, .intptr_t => target.ptrBitWidth(),
 
-            .uint8_t,  .int8_t   => 8,
-            .uint16_t, .int16_t  => 16,
-            .uint24_t, .int24_t  => 24,
-            .uint32_t, .int32_t  => 32,
-            .uint48_t, .int48_t  => 48,
-            .uint64_t, .int64_t  => 64,
-            .zig_u128, .zig_i128 => 128,
-            // zig fmt: on
+                .uint8_t, .int8_t => 8,
+                .uint16_t, .int16_t => 16,
+                .uint24_t, .int24_t => 24,
+                .uint32_t, .int32_t => 32,
+                .uint48_t, .int48_t => 48,
+                .uint64_t, .int64_t => 64,
+                .zig_u128, .zig_i128 => 128,
             };
         }
     };
@@ -239,20 +237,8 @@ pub const CType = union(enum) {
     ) Allocator.Error!CType {
         const gpa = zcu.comp.gpa;
         const ip = &zcu.intern_pool;
-        var cur_ty: Type = if (start_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (start_ty.restrictedRepr(zcu)) {
-            .indirect => {
-                const unrestricted_cty = try lowerInner(unrestricted_ty, true, deps, arena, zcu);
-                const unrestricted_cty_buf = try arena.create(CType);
-                unrestricted_cty_buf.* = unrestricted_cty;
-                return .{ .pointer = .{
-                    .@"const" = true,
-                    .@"volatile" = false,
-                    .elem_ty = unrestricted_cty_buf,
-                    .nonstring = unrestricted_cty.isStringElem(),
-                } };
-            },
-            .direct => unrestricted_ty,
-        } else start_ty;
+        if (ip.isRestrictedType(start_ty.toIntern())) return .{ .int = .uint32_t };
+        var cur_ty = start_ty;
         while (true) {
             switch (cur_ty.zigTypeTag(zcu)) {
                 .type,
@@ -494,6 +480,7 @@ pub const CType = union(enum) {
 
     /// Asserts that `ty` is an integer, enum, bitpack, or error set.
     pub fn classifyInt(ty: Type, zcu: *const Zcu) IntClass {
+        if (zcu.intern_pool.isRestrictedType(ty.toIntern())) return classifyBitInt(.unsigned, 32, zcu);
         const int_ty: Type = switch (ty.zigTypeTag(zcu)) {
             .error_set => return classifyBitInt(.unsigned, zcu.errorSetBits(), zcu),
             .@"enum" => ty.intTagType(zcu),
@@ -502,22 +489,20 @@ pub const CType = union(enum) {
             else => unreachable,
         };
         switch (int_ty.toIntern()) {
-            // zig fmt: off
-        .usize_type => return .{ .small = .uintptr_t },
-        .isize_type => return .{ .small = .intptr_t },
+            .usize_type => return .{ .small = .uintptr_t },
+            .isize_type => return .{ .small = .intptr_t },
 
-        .c_char_type => return .{ .small = .char },
+            .c_char_type => return .{ .small = .char },
 
-        .c_short_type    => return .{ .small = .@"signed short" },
-        .c_int_type      => return .{ .small = .@"signed int" },
-        .c_long_type     => return .{ .small = .@"signed long" },
-        .c_longlong_type => return .{ .small = .@"signed long long" },
+            .c_short_type => return .{ .small = .@"signed short" },
+            .c_int_type => return .{ .small = .@"signed int" },
+            .c_long_type => return .{ .small = .@"signed long" },
+            .c_longlong_type => return .{ .small = .@"signed long long" },
 
-        .c_ushort_type    => return .{ .small = .@"unsigned short" },
-        .c_uint_type      => return .{ .small = .@"unsigned int" },
-        .c_ulong_type     => return .{ .small = .@"unsigned long" },
-        .c_ulonglong_type => return .{ .small = .@"unsigned long long" },
-        // zig fmt: on
+            .c_ushort_type => return .{ .small = .@"unsigned short" },
+            .c_uint_type => return .{ .small = .@"unsigned int" },
+            .c_ulong_type => return .{ .small = .@"unsigned long" },
+            .c_ulonglong_type => return .{ .small = .@"unsigned long long" },
 
             else => {
                 const int = ty.intInfo(zcu);

@@ -4001,7 +4001,11 @@ pub const Feature = enum {
 
 pub fn backendSupportsFeature(zcu: *const Zcu, comptime feature: Feature) bool {
     const backend = target_util.zigBackend(&zcu.root_mod.resolved_target.result, zcu.comp.config.use_llvm);
-    return target_util.backendSupportsFeature(backend, zcu.comp.config.incremental, feature);
+    return target_util.backendSupportsFeature(feature, .{
+        .backend = backend,
+        .incremental = zcu.comp.config.incremental,
+        .use_new_linker = zcu.comp.config.use_new_linker,
+    });
 }
 
 pub const AtomicPtrAlignmentError = error{

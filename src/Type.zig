@@ -1017,10 +1017,10 @@ pub fn abiAlignment(ty: Type, zcu: *const Zcu) Alignment {
 
             .generic_poison => unreachable,
         },
-        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-            .indirect => ptrAbiAlignment(target),
-            .direct => return abiAlignment(.fromInterned(restricted_type.unrestricted_type), zcu),
-        },
+        .restricted_type => |restricted_type| if (zcu.backendSupportsFeature(.restricted_types))
+            .fromByteUnits(std.zig.target.intAlignment(target, 32))
+        else
+            abiAlignment(.fromInterned(restricted_type.unrestricted_type), zcu),
         .tuple_type => |tuple| {
             var big_align: Alignment = .@"1";
             for (tuple.types.get(ip), tuple.values.get(ip)) |field_ty, val| {
@@ -1171,10 +1171,10 @@ pub fn abiSize(ty: Type, zcu: *const Zcu) u64 {
             .anyopaque => unreachable,
             .generic_poison => unreachable,
         },
-        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-            .indirect => ptrAbiSize(target),
-            .direct => return abiSize(.fromInterned(restricted_type.unrestricted_type), zcu),
-        },
+        .restricted_type => |restricted_type| if (zcu.backendSupportsFeature(.restricted_types))
+            std.zig.target.intByteSize(target, 32)
+        else
+            abiSize(.fromInterned(restricted_type.unrestricted_type), zcu),
         .tuple_type => |tuple| switch (ty.classify(zcu)) {
             // `structFieldOffset` is bogus on NPV tuples, because there may be some fields with
             // non-zero size.
@@ -1301,10 +1301,10 @@ pub fn bitSize(ty: Type, zcu: *const Zcu) u64 {
             .generic_poison => unreachable,
         },
 
-        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-            .indirect => target.ptrBitWidth(),
-            .direct => return bitSize(.fromInterned(restricted_type.unrestricted_type), zcu),
-        },
+        .restricted_type => |restricted_type| if (zcu.backendSupportsFeature(.restricted_types))
+            32
+        else
+            bitSize(.fromInterned(restricted_type.unrestricted_type), zcu),
         .struct_type => {
             const struct_obj = ip.loadStructType(ty.toIntern());
             switch (struct_obj.layout) {
@@ -1359,17 +1359,6 @@ pub fn unrestrictedType(ty: Type, zcu: *const Zcu) ?Type {
     return switch (ip.indexToKey(ty.toIntern())) {
         .restricted_type => |restricted_type| return .fromInterned(restricted_type.unrestricted_type),
         else => null,
-    };
-}
-
-const RestrictedRepr = enum { indirect, direct };
-pub fn restrictedRepr(ty: Type, zcu: *const Zcu) RestrictedRepr {
-    return restrictedReprByTrackedInst(zcu.intern_pool.indexToKey(ty.toIntern()).restricted_type.zir_index, zcu);
-}
-pub fn restrictedReprByTrackedInst(zir_index: InternPool.TrackedInst.Index, zcu: *const Zcu) RestrictedRepr {
-    return switch (zcu.fileByIndex(zir_index.resolveFile(&zcu.intern_pool)).mod.?.optimize_mode) {
-        .Debug, .ReleaseSafe => if (zcu.backendSupportsFeature(.restricted_types)) .indirect else .direct,
-        .ReleaseFast, .ReleaseSmall => .direct,
     };
 }
 
@@ -1450,23 +1439,15 @@ pub fn isCPtr(ty: Type, zcu: *const Zcu) bool {
 
 pub fn isPtrAtRuntime(ty: Type, zcu: *const Zcu) bool {
     const ip = &zcu.intern_pool;
-    return ty: switch (ip.indexToKey(ty.toIntern())) {
+    return switch (ip.indexToKey(ty.toIntern())) {
         .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
             .slice => false,
             .one, .many, .c => true,
         },
-        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-            .indirect => true,
-            .direct => continue :ty ip.indexToKey(restricted_type.unrestricted_type),
-        },
-        .opt_type => |child| opt_child: switch (ip.indexToKey(child)) {
+        .opt_type => |child| switch (ip.indexToKey(child)) {
             .ptr_type => |p| switch (p.flags.size) {
                 .slice, .c => false,
                 .many, .one => !p.flags.is_allowzero,
-            },
-            .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-                .indirect => true,
-                .direct => continue :opt_child ip.indexToKey(restricted_type.unrestricted_type),
             },
             else => false,
         },
@@ -1483,20 +1464,12 @@ pub fn ptrAllowsZero(ty: Type, zcu: *const Zcu) bool {
 /// See also `isPtrLikeOptional`.
 pub fn optionalReprIsPayload(ty: Type, zcu: *const Zcu) bool {
     const ip = &zcu.intern_pool;
-    return ty: switch (ip.indexToKey(ty.toIntern())) {
+    return switch (ip.indexToKey(ty.toIntern())) {
         .ptr_type => |ptr_type| ptr_type.flags.size == .c,
-        .opt_type => |opt_child_type| opt_child_type == .anyerror_type or opt_child: switch (ip.indexToKey(opt_child_type)) {
+        .opt_type => |opt_child_type| opt_child_type == .anyerror_type or switch (ip.indexToKey(opt_child_type)) {
             .ptr_type => |ptr_type| ptr_type.flags.size != .c and !ptr_type.flags.is_allowzero,
             .error_set_type, .inferred_error_set_type => true,
-            .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-                .indirect => true,
-                .direct => continue :opt_child ip.indexToKey(restricted_type.unrestricted_type),
-            },
             else => false,
-        },
-        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-            .indirect => false,
-            .direct => continue :ty ip.indexToKey(restricted_type.unrestricted_type),
         },
         else => false,
     };
@@ -1506,22 +1479,14 @@ pub fn optionalReprIsPayload(ty: Type, zcu: *const Zcu) bool {
 /// address value, using 0 for null. Note that this returns true for C pointers.
 pub fn isPtrLikeOptional(ty: Type, zcu: *const Zcu) bool {
     const ip = &zcu.intern_pool;
-    return ty: switch (ip.indexToKey(ty.toIntern())) {
+    return switch (ip.indexToKey(ty.toIntern())) {
         .ptr_type => |ptr_type| ptr_type.flags.size == .c,
-        .opt_type => |opt_child_type| opt_child: switch (ip.indexToKey(opt_child_type)) {
+        .opt_type => |opt_child_type| switch (ip.indexToKey(opt_child_type)) {
             .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
                 .slice, .c => false,
                 .many, .one => !ptr_type.flags.is_allowzero,
             },
-            .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-                .indirect => true,
-                .direct => continue :opt_child ip.indexToKey(restricted_type.unrestricted_type),
-            },
             else => false,
-        },
-        .restricted_type => |restricted_type| switch (restrictedReprByTrackedInst(restricted_type.zir_index, zcu)) {
-            .indirect => false,
-            .direct => continue :ty ip.indexToKey(restricted_type.unrestricted_type),
         },
         else => false,
     };
@@ -2056,20 +2021,12 @@ pub fn fnCallingConvention(ty: Type, zcu: *const Zcu) std.builtin.CallingConvent
     return zcu.intern_pool.indexToKey(ty.toIntern()).func_type.cc;
 }
 
-pub fn isValidParamType(self: Type, zcu: *const Zcu) bool {
-    if (self.toIntern() == .generic_poison_type) return true;
-    return switch (self.zigTypeTag(zcu)) {
-        .@"opaque", .noreturn => false,
-        else => true,
-    };
+pub fn isValidParamType(ty: Type, zcu: *const Zcu) bool {
+    return ty.toIntern() == .noreturn_type or ty.isValidReturnType(zcu);
 }
 
-pub fn isValidReturnType(self: Type, zcu: *const Zcu) bool {
-    if (self.toIntern() == .generic_poison_type) return true;
-    return switch (self.zigTypeTag(zcu)) {
-        .@"opaque" => false,
-        else => true,
-    };
+pub fn isValidReturnType(ty: Type, zcu: *const Zcu) bool {
+    return ty.toIntern() == .generic_poison_type or !zcu.intern_pool.isOpaqueType(ty.toIntern());
 }
 
 /// Asserts the type is a function.

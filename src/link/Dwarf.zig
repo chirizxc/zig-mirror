@@ -3510,13 +3510,9 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
 
     if (value_index == .anyerror_type) return; // handled in `flush` instead
 
-    const value_ip_key: InternPool.Key = switch (ip.indexToKey(value_index)) {
+    const value_ip_key = switch (ip.indexToKey(value_index)) {
         .func => return, // populated by the Nav instead (`updateComptimeNav` or `initWipNav`)
         .@"extern" => return, // populated by the Nav instead (`initWipNav`)
-        .restricted_value => |restricted_value| switch (Type.restrictedRepr(.fromInterned(restricted_value.ty), zcu)) {
-            .indirect => .{ .restricted_value = restricted_value },
-            .direct => ip.indexToKey(restricted_value.unrestricted_value),
-        },
         else => |key| key,
     };
 
@@ -3845,26 +3841,20 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
             .adhoc_inferred_error_set => unreachable,
         },
         .restricted_type => |restricted_type| {
-            const repr = Type.restrictedReprByTrackedInst(restricted_type.zir_index, zcu);
-            try wip_nav.abbrevCode(switch (repr) {
-                .indirect => .ptr_type,
-                .direct => .alias_type,
-            });
+            try wip_nav.abbrevCode(.generated_struct_type);
             try wip_nav.strpFmt("{f}", .{val.toType().fmt(pt)});
-            switch (repr) {
-                .indirect => {
-                    try diw.writeByte(@intFromEnum(InternPool.Key.PtrType.AddressSpace.generic));
-                    try wip_nav.infoSectionOffset(
-                        .debug_info,
-                        wip_nav.unit,
-                        wip_nav.entry,
-                        @intCast(diw.end + dwarf.sectionOffsetBytes()),
-                    );
-                    try wip_nav.abbrevCode(.is_const);
-                },
-                .direct => {},
+            try diw.writeUleb128(val.toType().abiSize(zcu));
+            try diw.writeUleb128(val.toType().abiAlignment(zcu).toByteUnits().?);
+            {
+                try wip_nav.abbrevCode(.generated_field);
+                try wip_nav.strp("value");
+                try wip_nav.refType(if (zcu.backendSupportsFeature(.restricted_types))
+                    .u32
+                else
+                    .fromInterned(restricted_type.unrestricted_type));
+                try diw.writeUleb128(0);
             }
-            try wip_nav.refType(.fromInterned(restricted_type.unrestricted_type));
+            try diw.writeUleb128(@intFromEnum(AbbrevCode.null));
         },
         .tuple_type => |tuple_type| if (tuple_type.types.len == 0) {
             try wip_nav.abbrevCode(.generated_empty_struct_type);
@@ -4645,7 +4635,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
         .un => |un| {
             try wip_nav.abbrevCode(.aggregate_comptime_value);
             try wip_nav.refType(.fromInterned(un.ty));
-            field: {
+            {
                 const loaded_union_type = ip.loadUnionType(un.ty);
                 assert(loaded_union_type.layout == .auto);
                 const field_index = zcu.unionTagFieldIndex(loaded_union_type, Value.fromInterned(un.tag)).?;
@@ -4658,23 +4648,35 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                 else if (has_runtime_bits)
                     .comptime_value_field_runtime_bits
                 else
-                    break :field);
+                    .field);
                 try wip_nav.strp(field_name.toSlice(ip));
                 if (has_comptime_state)
                     try wip_nav.refValue(.fromInterned(un.val))
-                else
+                else if (has_runtime_bits)
                     try wip_nav.blockValue(src_loc, .fromInterned(un.val));
             }
             try diw.writeUleb128(@intFromEnum(AbbrevCode.null));
         },
-        .restricted_value => |restricted_value| { // repr checked above
-            try wip_nav.abbrevCode(.location_comptime_value);
-            const unrestricted_unit, const unrestricted_entry =
-                try wip_nav.getValueEntry(.fromInterned(restricted_value.unrestricted_value));
-            try wip_nav.infoExprLoc(.{ .implicit_pointer = .{
-                .unit = unrestricted_unit,
-                .entry = unrestricted_entry,
-            } });
+        .restricted_value => |restricted_value| {
+            try wip_nav.abbrevCode(.aggregate_comptime_value);
+            try wip_nav.refType(.fromInterned(restricted_value.ty));
+            field: {
+                const unrestricted_ty: Type = .fromInterned(ip.typeOf(restricted_value.unrestricted_value));
+                const has_runtime_bits = unrestricted_ty.hasRuntimeBits(zcu);
+                const has_comptime_state = unrestricted_ty.comptimeOnly(zcu);
+                try wip_nav.abbrevCode(if (has_comptime_state)
+                    .comptime_value_field_comptime_state
+                else if (has_runtime_bits)
+                    .comptime_value_field_runtime_bits
+                else
+                    break :field);
+                try wip_nav.strp("value");
+                if (has_comptime_state)
+                    try wip_nav.refValue(.fromInterned(restricted_value.unrestricted_value))
+                else if (has_runtime_bits)
+                    try wip_nav.blockValue(src_loc, .fromInterned(restricted_value.unrestricted_value));
+            }
+            try diw.writeUleb128(@intFromEnum(AbbrevCode.null));
         },
         .memoized_call => unreachable, // not a value
     }

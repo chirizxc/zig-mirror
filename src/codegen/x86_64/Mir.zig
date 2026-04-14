@@ -1877,15 +1877,15 @@ pub const Memory = struct {
                 .mod = mem.mod,
                 .size = switch (mem.mod) {
                     .rm => |rm| rm.size,
-                    .off => undefined,
+                    .off => .none,
                 },
                 .index = switch (mem.mod) {
                     .rm => |rm| rm.index,
-                    .off => undefined,
+                    .off => .none,
                 },
                 .scale = switch (mem.mod) {
                     .rm => |rm| rm.scale,
-                    .off => undefined,
+                    .off => .@"1",
                 },
             },
             .base = switch (mem.base) {

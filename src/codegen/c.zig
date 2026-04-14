@@ -1306,20 +1306,15 @@ pub const DeclGen = struct {
                     if (loaded_union.layout == .auto) try w.writeByte('}');
                 }
             },
-            .restricted_value => |restricted_value| switch (ty.restrictedRepr(zcu)) {
-                .indirect => {
-                    const loaded_restricted = ip.loadRestrictedType(ty.toIntern());
-                    // Explicitly add the restricted decl dependency on the unrestricted type
-                    _ = try CType.lower(.fromInterned(loaded_restricted.unrestricted_type), &dg.ctype_deps, dg.arena, zcu);
-                    try dg.need_restricted.put(zcu.gpa, val.toIntern(), {});
+            .restricted_value => {
+                const loaded_restricted = ip.loadRestrictedType(ty.toIntern());
+                // Explicitly add the restricted decl dependency on the unrestricted type
+                _ = try CType.lower(.fromInterned(loaded_restricted.unrestricted_type), &dg.ctype_deps, dg.arena, zcu);
+                try dg.need_restricted.put(zcu.gpa, val.toIntern(), {});
 
-                    const restricted_ty_name = loaded_restricted.name.toSlice(ip);
-                    try w.print("&zig_restricted_{f}__{d}[zig_restricted_index_{f}__{d}]", .{
-                        fmtIdentUnsolo(restricted_ty_name), ty.toIntern(),
-                        fmtIdentUnsolo(restricted_ty_name), val.toIntern(),
-                    });
-                },
-                .direct => try dg.renderValue(w, .fromInterned(restricted_value.unrestricted_value), initializer_type),
+                try w.print("zig_restricted_value_{f}__{d}", .{
+                    fmtIdentUnsolo(loaded_restricted.name.toSlice(ip)), val.toIntern(),
+                });
             },
         }
     }
@@ -1327,7 +1322,7 @@ pub const DeclGen = struct {
     fn renderUndefValue(
         dg: *DeclGen,
         w: *Writer,
-        start_ty: Type,
+        ty: Type,
         location: ValueRenderLocation,
     ) Error!void {
         const pt = dg.pt;
@@ -1345,8 +1340,7 @@ pub const DeclGen = struct {
             .ReleaseFast, .ReleaseSmall => false,
         };
 
-        var ty = start_ty;
-        ty: switch (start_ty.toIntern()) {
+        switch (ty.toIntern()) {
             .c_longdouble_type,
             .f16_type,
             .f32_type,
@@ -1374,12 +1368,13 @@ pub const DeclGen = struct {
                 return w.writeByte(')');
             },
             .bool_type => try w.writeAll(if (safety_on) "0xaa" else "false"),
-            else => ty_key: switch (ip.indexToKey(ty.toIntern())) {
+            else => switch (ip.indexToKey(ty.toIntern())) {
                 .simple_type, // anyerror, c_char (etc), usize, isize
                 .int_type,
                 .enum_type,
                 .error_set_type,
                 .inferred_error_set_type,
+                .restricted_type,
                 => switch (CType.classifyInt(ty, zcu)) {
                     .void => unreachable, // opv
                     .small => |s| {
@@ -1473,16 +1468,6 @@ pub const DeclGen = struct {
                         try w.writeAll(", .payload = ");
                         try dg.renderUndefValue(w, .fromInterned(child_type), initializer_type);
                         try w.writeAll(" }");
-                    },
-                },
-                .restricted_type => |restricted_type| switch (ty.restrictedRepr(zcu)) {
-                    .indirect => continue :ty_key .{ .ptr_type = .{
-                        .child = restricted_type.unrestricted_type,
-                        .flags = .{ .is_const = true },
-                    } },
-                    .direct => {
-                        ty = .fromInterned(restricted_type.unrestricted_type);
-                        continue :ty restricted_type.unrestricted_type;
                     },
                 },
                 .struct_type => {
@@ -2138,8 +2123,8 @@ pub fn genRestricted(
         });
         for (restricted_vals.keys(), 0..) |restricted_val, restricted_index| {
             try w.print(
-                \\#define zig_restricted_index_{f}__{d} {d}u
-                \\ [zig_restricted_index_{f}__{d}] = 
+                \\#define zig_restricted_value_{f}__{d} {d}u
+                \\ [zig_restricted_value_{f}__{d}] = 
             , .{
                 fmtIdentUnsolo(restricted_ty_name),
                 restricted_val,
@@ -5641,81 +5626,29 @@ fn airUnwrapRestricted(f: *Function, inst: Air.Inst.Index, safety: bool) !CValue
     // Implicitly adds the restricted decl dependency on the unrestricted type
     const local = try f.allocLocal(inst, unrestricted_ty);
 
-    switch (restricted_ty.restrictedRepr(zcu)) {
-        .indirect => {
-            if (safety) {
-                const target = &f.dg.mod.resolved_target.result;
-                const ptr_bits = target.ptrBitWidth();
-
-                try f.dg.need_restricted.put(zcu.gpa, restricted_ty.toIntern(), {});
-                const unrestricted_size = unrestricted_ty.abiSize(zcu);
-                assert(unrestricted_size > 0);
-                const restricted_ty_name = ip.loadRestrictedType(restricted_ty.toIntern()).name.toSlice(ip);
-
-                const ptr_diff = try f.allocLocal(inst, .usize);
-                try f.writeCValue(w, ptr_diff, .other);
-                try w.print(" = zig_subw_u{d}(({f})", .{
-                    ptr_bits,
-                    CType.fmtTypeName(.{ .int = .uintptr_t }, zcu),
-                });
-                try f.writeCValue(w, operand, .other);
-                try w.print(", ({f})zig_restricted_{f}__{d}, {f});", .{
-                    CType.fmtTypeName(.{ .int = .uintptr_t }, zcu),
-                    fmtIdentUnsolo(restricted_ty_name),
-                    restricted_ty.toIntern(),
-                    fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits, false, 10, .lower),
-                });
-                try f.newline();
-
-                try w.writeAll("if (");
-                if (unrestricted_size == 1) {
-                    try f.writeCValue(w, ptr_diff, .other);
-                } else if (std.math.isPowerOfTwo(unrestricted_size)) {
-                    const rotate_amount = std.math.log2_int(u64, unrestricted_size);
-                    try w.print("(zig_shr_u{d}(", .{ptr_bits});
-                    try f.writeCValue(w, ptr_diff, .other);
-                    try w.print(", {f}) | zig_shlw_u{d}(", .{
-                        fmtUnsignedIntLiteralSmall(target, .uint8_t, rotate_amount, false, 10, .lower),
-                        ptr_bits,
-                    });
-                    try f.writeCValue(w, ptr_diff, .other);
-                    try w.print(", {f}, {f}))", .{
-                        fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits - rotate_amount, false, 10, .lower),
-                        fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits, false, 10, .lower),
-                    });
-                } else {
-                    try f.writeCValue(w, ptr_diff, .other);
-                    try w.print(" % {f} != {f} || ", .{
-                        fmtUnsignedIntLiteralSmall(target, .uintptr_t, unrestricted_size, false, 10, .lower),
-                        fmtUnsignedIntLiteralSmall(target, .uintptr_t, 0, false, 10, .lower),
-                    });
-                    try f.writeCValue(w, ptr_diff, .other);
-                    try w.print(" / {f}", .{
-                        fmtUnsignedIntLiteralSmall(target, .uintptr_t, unrestricted_size, false, 10, .lower),
-                    });
-                }
-                try w.print(" >= zig_restricted_len_{f}__{d}) {{", .{
-                    fmtIdentUnsolo(restricted_ty_name),
-                    restricted_ty.toIntern(),
-                });
-                f.indent();
-                try f.newline();
-                try f.writePanic(.corrupt_restricted_value, w);
-                try f.outdent();
-                try w.writeByte('}');
-                try f.newline();
-            }
-            try f.writeCValue(w, local, .other);
-            try w.writeAll(" = ");
-            try f.writeCValueDeref(w, operand);
-        },
-        .direct => {
-            try f.writeCValue(w, local, .other);
-            try w.writeAll(" = ");
-            try f.writeCValue(w, operand, .other);
-        },
+    try f.dg.need_restricted.put(zcu.gpa, restricted_ty.toIntern(), {});
+    const restricted_ty_name = ip.loadRestrictedType(restricted_ty.toIntern()).name.toSlice(ip);
+    if (safety) {
+        try w.writeAll("if (");
+        try f.writeCValue(w, operand, .other);
+        try w.print(" >= zig_restricted_len_{f}__{d}) {{", .{
+            fmtIdentUnsolo(restricted_ty_name),
+            restricted_ty.toIntern(),
+        });
+        f.indent();
+        try f.newline();
+        try f.writePanic(.corrupt_restricted_value, w);
+        try f.outdent();
+        try w.writeByte('}');
+        try f.newline();
     }
-    try w.writeByte(';');
+    try f.writeCValue(w, local, .other);
+    try w.print(" = zig_restricted_{f}__{d}[", .{
+        fmtIdentUnsolo(restricted_ty_name),
+        restricted_ty.toIntern(),
+    });
+    try f.writeCValue(w, operand, .other);
+    try w.writeAll("];");
     try f.newline();
 
     return local;

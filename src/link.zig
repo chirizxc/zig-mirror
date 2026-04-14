@@ -412,6 +412,8 @@ pub const File = struct {
     lock: ?Cache.Lock = null,
     child_pid: ?std.process.Child.Id = null,
 
+    restricted: std.array_hash_map.Auto(InternPool.Index, std.array_hash_map.Auto(InternPool.Index, void)) = .empty,
+
     pub const OpenOptions = struct {
         symbol_count_hint: u64 = 32,
         program_code_size_hint: u64 = 256 * 1024,
@@ -894,6 +896,10 @@ pub const File = struct {
     }
 
     pub fn destroy(base: *File) void {
+        const gpa = base.comp.gpa;
+        for (base.restricted.values()) |*value| value.deinit(gpa);
+        base.restricted.deinit(gpa);
+
         const io = base.comp.io;
         base.releaseLock();
         if (base.file) |f| f.close(io);

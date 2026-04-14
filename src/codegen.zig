@@ -233,6 +233,7 @@ const LazySymbolStructure = struct {
 
         pub const Operation = enum {
             end_ptr_inc,
+            append_restricted,
 
             pub fn apply(operation: Operation, slice: []u8, target_opts: struct {
                 ptr_bit_width: u16,
@@ -253,6 +254,7 @@ const LazySymbolStructure = struct {
                             );
                         },
                     },
+                    .append_restricted => unreachable,
                 }
             }
         };
@@ -290,16 +292,6 @@ pub fn getLazySymbolInfo(
                 .structure => .{},
                 .attributes => .{ .required_alignment = .@"1" },
             },
-            .restricted_type => |restricted_type| switch (kind) {
-                .structure => .{},
-                .attributes => {
-                    const restricted_ty: Type = .fromInterned(lazy_sym.key);
-                    const unrestricted_ty: Type =
-                        .fromInterned(restricted_type.unrestricted_type);
-                    return .{ .required_alignment = restricted_ty.abiAlignment(zcu)
-                        .maxStrict(unrestricted_ty.abiAlignment(zcu)) };
-                },
-            },
         },
         .deferred_const_data => switch (lazy_sym.key) {
             else => unreachable,
@@ -309,33 +301,14 @@ pub fn getLazySymbolInfo(
             },
             _ => switch (ip.indexToKey(lazy_sym.key)) {
                 else => unreachable,
-                .restricted_value => |restricted_value| switch (kind) {
-                    .structure => .{ .parent = .{ .kind = .const_data, .key = restricted_value.ty }, .modify = .{
-                        .lazy_sym = .{ .kind = .deferred_const_data, .key = restricted_value.ty },
-                        .operation = .end_ptr_inc,
-                    } },
-                    .attributes => {
-                        const unrestricted_ty: Type = .fromInterned(
-                            ip.indexToKey(restricted_value.ty).restricted_type.unrestricted_type,
-                        );
-                        return .{
-                            .required_alignment = unrestricted_ty.abiAlignment(zcu),
-                            .size = unrestricted_ty.abiSize(zcu),
-                        };
-                    },
-                },
-                .restricted_type => switch (kind) {
-                    .structure => .{ .parent = .{ .kind = .const_data, .key = lazy_sym.key } },
+                .restricted_type => |restricted_type| switch (kind) {
+                    .structure => .{},
                     .attributes => {
                         const restricted_ty: Type = .fromInterned(lazy_sym.key);
-                        const unrestricted_ty: Type = .fromInterned(
-                            ip.indexToKey(lazy_sym.key).restricted_type.unrestricted_type,
-                        );
-                        return .{
-                            .header = true,
-                            .required_alignment = restricted_ty.abiAlignment(zcu),
-                            .size = unrestricted_ty.abiAlignment(zcu).forward(restricted_ty.abiSize(zcu)),
-                        };
+                        const unrestricted_ty: Type =
+                            .fromInterned(restricted_type.unrestricted_type);
+                        return .{ .required_alignment = restricted_ty.abiAlignment(zcu)
+                            .maxStrict(unrestricted_ty.abiAlignment(zcu)) };
                     },
                 },
             },
@@ -379,7 +352,6 @@ pub fn generateLazySymbol(
                 }
                 return;
             },
-            .restricted_type => return,
             else => {},
         },
         .deferred_const_data => switch (lazy_sym.key) {
@@ -404,10 +376,22 @@ pub fn generateLazySymbol(
                 return;
             },
             _ => switch (ip.indexToKey(lazy_sym.key)) {
-                .restricted_value => |restricted_value| return generateSymbol(bin_file, pt, src_loc, .fromInterned(
-                    restricted_value.unrestricted_value,
-                ), w, reloc_parent),
-                .restricted_type => return w.splatByteAll(0, @divExact(zcu.getTarget().ptrBitWidth(), 8)),
+                .restricted_type => |restricted_type| {
+                    const restricted_ty: Type = .fromInterned(lazy_sym.key);
+                    const unrestricted_ty: Type = .fromInterned(restricted_type.unrestricted_type);
+                    const values: *const std.array_hash_map.Auto(InternPool.Index, void) =
+                        bin_file.restricted.getPtr(lazy_sym.key) orelse &.empty;
+                    const values_len = values.count();
+                    const len_size = restricted_ty.abiSize(zcu);
+                    const array_start = unrestricted_ty.abiAlignment(zcu).forward(len_size);
+                    try w.rebase(w.end, array_start + unrestricted_ty.abiSize(zcu) * values_len);
+                    w.writeInt(u32, @intCast(values_len), endian) catch unreachable;
+                    w.splatByteAll(0, array_start - len_size) catch unreachable;
+                    for (values.keys()) |value| try generateSymbol(bin_file, pt, src_loc, .fromInterned(
+                        ip.indexToKey(value).restricted_value.unrestricted_value,
+                    ), w, reloc_parent);
+                    return;
+                },
                 else => {},
             },
             else => {},
@@ -782,10 +766,13 @@ pub fn generateSymbol(
             }
         },
         .bitpack => |bitpack| try generateSymbol(bin_file, pt, src_loc, .fromInterned(bitpack.backing_int_val), w, reloc_parent),
-        .restricted_value => |restricted_value| switch (ty.restrictedRepr(zcu)) {
-            .indirect => try lowerLazySymbolRef(bin_file, pt, .{ .kind = .deferred_const_data, .key = val.toIntern() }, w, reloc_parent, 0),
-            .direct => try generateSymbol(bin_file, pt, src_loc, .fromInterned(restricted_value.unrestricted_value), w, reloc_parent),
-        },
+        .restricted_value => |restricted_value| if (zcu.backendSupportsFeature(.restricted_types)) {
+            const gpa = zcu.gpa;
+            const type_gop = try bin_file.restricted.getOrPut(gpa, restricted_value.ty);
+            if (!type_gop.found_existing) type_gop.value_ptr.* = .empty;
+            const value_gop = try type_gop.value_ptr.getOrPut(gpa, val.toIntern());
+            try w.writeInt(u32, @intCast(value_gop.index), endian);
+        } else try generateSymbol(bin_file, pt, src_loc, .fromInterned(restricted_value.unrestricted_value), w, reloc_parent),
         .memoized_call => unreachable,
     }
 }
@@ -1167,7 +1154,6 @@ pub fn genTypedValue(
             } },
             .fail => |em| .{ .fail = em },
         },
-        .lea_lazy_sym => unreachable, // `Zcu.Feature.restricted_types` is not supported by this code path
     };
 }
 
@@ -1180,7 +1166,6 @@ const LowerResult = union(enum) {
     lea_nav: InternPool.Nav.Index,
     load_uav: InternPool.Key.Ptr.BaseAddr.Uav,
     lea_uav: InternPool.Key.Ptr.BaseAddr.Uav,
-    lea_lazy_sym: link.File.LazySymbol,
 };
 
 pub fn lowerValue(pt: Zcu.PerThread, start_val: Value, target: *const std.Target) Allocator.Error!LowerResult {
@@ -1192,12 +1177,15 @@ pub fn lowerValue(pt: Zcu.PerThread, start_val: Value, target: *const std.Target
 
     if (start_val.isUndef(zcu)) return .undef;
 
-    const ty, const val: Value = if (start_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (start_ty.restrictedRepr(zcu)) {
-        .indirect => return .{ .lea_lazy_sym = .{ .kind = .deferred_const_data, .key = start_val.toIntern() } },
-        .direct => .{ unrestricted_ty, .fromInterned(ip.indexToKey(start_val.toIntern()).restricted_value.unrestricted_value) },
-    } else .{ start_ty, start_val };
+    const ty, const val: Value, const use_uav = if (start_ty.unrestrictedType(zcu)) |unrestricted_ty|
+        if (zcu.backendSupportsFeature(.restricted_types))
+            .{ start_ty, start_val, true }
+        else
+            .{ unrestricted_ty, .fromInterned(ip.indexToKey(start_val.toIntern()).restricted_value.unrestricted_value), false }
+    else
+        .{ start_ty, start_val, false };
 
-    switch (ty.zigTypeTag(zcu)) {
+    if (!use_uav) switch (ty.zigTypeTag(zcu)) {
         .void => return .none,
         .bool => return .{ .immediate = @intFromBool(val.toBool()) },
         .pointer => switch (ty.ptrSize(zcu)) {
@@ -1308,7 +1296,7 @@ pub fn lowerValue(pt: Zcu.PerThread, start_val: Value, target: *const std.Target
         .@"opaque" => unreachable,
 
         else => {},
-    }
+    };
 
     return .{ .load_uav = .{
         .val = val.toIntern(),

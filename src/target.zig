@@ -908,9 +908,13 @@ pub fn zigBackend(target: *const std.Target, use_llvm: bool) std.builtin.Compile
     };
 }
 
-pub inline fn backendSupportsFeature(backend: std.builtin.CompilerBackend, incremental: bool, comptime feature: Feature) bool {
+pub inline fn backendSupportsFeature(comptime feature: Feature, opts: struct {
+    backend: std.builtin.CompilerBackend,
+    incremental: bool,
+    use_new_linker: bool,
+}) bool {
     return switch (feature) {
-        .panic_fn => switch (backend) {
+        .panic_fn => switch (opts.backend) {
             .stage2_aarch64,
             .stage2_c,
             .stage2_llvm,
@@ -920,23 +924,23 @@ pub inline fn backendSupportsFeature(backend: std.builtin.CompilerBackend, incre
             => true,
             else => false,
         },
-        .error_return_trace => switch (backend) {
+        .error_return_trace => switch (opts.backend) {
             .stage2_llvm, .stage2_x86_64 => true,
             else => false,
         },
-        .is_named_enum_value => switch (backend) {
+        .is_named_enum_value => switch (opts.backend) {
             .stage2_llvm, .stage2_x86_64 => true,
             else => false,
         },
-        .error_set_has_value => switch (backend) {
+        .error_set_has_value => switch (opts.backend) {
             .stage2_llvm, .stage2_wasm, .stage2_x86_64 => true,
             else => false,
         },
-        .field_reordering => switch (backend) {
+        .field_reordering => switch (opts.backend) {
             .stage2_aarch64, .stage2_c, .stage2_llvm, .stage2_x86_64 => true,
             else => false,
         },
-        .separate_thread => switch (backend) {
+        .separate_thread => switch (opts.backend) {
             // Supports a separate thread but does not support N separate
             // threads because they would all just be locking the same mutex to
             // protect Builder.
@@ -948,9 +952,10 @@ pub inline fn backendSupportsFeature(backend: std.builtin.CompilerBackend, incre
             // being run in a separate thread from now on.
             else => true,
         },
-        .restricted_types => switch (backend) {
+        .restricted_types => switch (opts.backend) {
             .stage2_c => true,
-            .stage2_llvm, .stage2_x86_64 => !incremental,
+            .stage2_llvm => !opts.incremental,
+            .stage2_x86_64 => !opts.incremental and opts.use_new_linker,
             else => false,
         },
     };
