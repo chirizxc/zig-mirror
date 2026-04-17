@@ -2009,7 +2009,7 @@ const have_waitid = switch (native_os) {
 
 const have_wait4 = switch (native_os) {
     .linux => @hasField(std.os.linux.SYS, "wait4"),
-    .dragonfly, .freebsd, .netbsd, .openbsd, .illumos, .serenity, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => true,
+    .dragonfly, .freebsd, .netbsd, .openbsd, .illumos, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => true,
     else => false,
 };
 
