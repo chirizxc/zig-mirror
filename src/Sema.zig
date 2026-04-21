@@ -926,6 +926,12 @@ const ComptimeReason = union(enum) {
         comptime_src: LazySrcLoc,
     },
 
+    /// Evaluating at comptime because we're coercing to a restricted type.
+    restricted_coercion: struct {
+        restricted_ty: Type,
+        unrestricted_ty: Type,
+    },
+
     fn explain(reason: ComptimeReason, sema: *Sema, src: LazySrcLoc, err_msg: *Zcu.ErrorMsg) !void {
         switch (reason) {
             .simple => |simple| {
@@ -954,6 +960,12 @@ const ComptimeReason = union(enum) {
             .comptime_param => |cp| {
                 try sema.errNote(src, err_msg, "argument to comptime parameter must be comptime-known", .{});
                 try sema.errNote(cp.comptime_src, err_msg, "parameter declared comptime here", .{});
+            },
+            .restricted_coercion => |rc| {
+                try sema.errNote(src, err_msg, "coercion to restricted type '{f}' from underlying type '{f}' must be comptime-known", .{
+                    rc.restricted_ty.fmt(sema.pt), rc.unrestricted_ty.fmt(sema.pt),
+                });
+                try sema.addDeclaredHereNote(err_msg, rc.restricted_ty);
             },
         }
     }
@@ -4156,7 +4168,7 @@ fn zirCoercePtrElemTy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileE
     const extra = sema.code.extraData(Zir.Inst.Bin, pl_node.payload_index).data;
     const uncoerced_val = sema.resolveInst(extra.rhs);
     const maybe_wrapped_ptr_ty = try sema.resolveTypeOrPoison(block, LazySrcLoc.unneeded, extra.lhs) orelse return uncoerced_val;
-    const ptr_ty = maybe_wrapped_ptr_ty.optEuBaseType(zcu);
+    const ptr_ty = maybe_wrapped_ptr_ty.restrictedOptEuBaseType(zcu);
     assert(ptr_ty.zigTypeTag(zcu) == .pointer); // validated by a previous instruction
     const elem_ty = ptr_ty.childType(zcu);
     switch (ptr_ty.ptrSize(zcu)) {
@@ -4255,7 +4267,7 @@ fn zirValidateRefTy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileErr
     // In case of GenericPoison, we don't actually have a type, so this will be
     // treated as an untyped address-of operator.
     const ty_operand = try sema.resolveTypeOrPoison(block, src, un_tok.operand) orelse return;
-    if (ty_operand.optEuBaseType(zcu).zigTypeTag(zcu) != .pointer) {
+    if (ty_operand.restrictedOptEuBaseType(zcu).zigTypeTag(zcu) != .pointer) {
         return sema.failWithOwnedErrorMsg(block, msg: {
             const msg = try sema.errMsg(src, "expected type '{f}', found pointer", .{ty_operand.fmt(pt)});
             errdefer msg.destroy(sema.gpa);
@@ -4287,7 +4299,7 @@ fn zirValidateArrayInitRefTy(
     const src = block.nodeOffset(pl_node.src_node);
     const extra = sema.code.extraData(Zir.Inst.ArrayInitRefTy, pl_node.payload_index).data;
     const maybe_wrapped_ptr_ty = try sema.resolveTypeOrPoison(block, LazySrcLoc.unneeded, extra.ptr_ty) orelse return .generic_poison_type;
-    const ptr_ty = maybe_wrapped_ptr_ty.optEuBaseType(zcu);
+    const ptr_ty = maybe_wrapped_ptr_ty.restrictedOptEuBaseType(zcu);
     assert(ptr_ty.zigTypeTag(zcu) == .pointer); // validated by a previous instruction
     switch (zcu.intern_pool.indexToKey(ptr_ty.toIntern())) {
         .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
@@ -4310,7 +4322,7 @@ fn zirValidateArrayInitRefTy(
         // The actual array type is unknown, which we represent with a generic poison.
         return .generic_poison_type;
     }
-    const arr_ty = ret_ty.optEuBaseType(zcu);
+    const arr_ty = ret_ty.restrictedOptEuBaseType(zcu);
     try sema.validateArrayInitTy(block, src, src, extra.elem_count, arr_ty);
     return Air.internedToRef(ret_ty.toIntern());
 }
@@ -4329,7 +4341,7 @@ fn zirValidateArrayInitTy(
     const extra = sema.code.extraData(Zir.Inst.ArrayInit, inst_data.payload_index).data;
     // It's okay for the type to be poison: this will result in an anonymous array init.
     const ty = try sema.resolveTypeOrPoison(block, ty_src, extra.ty) orelse return;
-    const arr_ty = if (is_result_ty) ty.optEuBaseType(zcu) else ty;
+    const arr_ty = if (is_result_ty) ty.restrictedOptEuBaseType(zcu) else ty;
     return sema.validateArrayInitTy(block, src, ty_src, extra.init_count, arr_ty);
 }
 
@@ -4388,7 +4400,7 @@ fn zirValidateStructInitTy(
     const src = block.nodeOffset(inst_data.src_node);
     // It's okay for the type to be poison: this will result in an anonymous struct init.
     const ty = try sema.resolveTypeOrPoison(block, src, inst_data.operand) orelse return;
-    const struct_ty = if (is_result_ty) ty.optEuBaseType(zcu) else ty;
+    const struct_ty = if (is_result_ty) ty.restrictedOptEuBaseType(zcu) else ty;
 
     switch (struct_ty.zigTypeTag(zcu)) {
         .@"struct", .@"union" => return,
@@ -4414,7 +4426,7 @@ fn zirValidatePtrStructInit(
     const field_ptr_data = sema.code.instructions.items(.data)[@intFromEnum(instrs[0])].pl_node;
     const field_ptr_extra = sema.code.extraData(Zir.Inst.Field, field_ptr_data.payload_index).data;
     const object_ptr = sema.resolveInst(field_ptr_extra.lhs);
-    const agg_ty = sema.typeOf(object_ptr).childType(zcu).optEuBaseType(zcu);
+    const agg_ty = sema.typeOf(object_ptr).childType(zcu).restrictedOptEuBaseType(zcu);
     switch (agg_ty.zigTypeTag(zcu)) {
         .@"struct" => return sema.validateStructInit(
             block,
@@ -4580,7 +4592,7 @@ fn zirValidatePtrArrayInit(
     const first_elem_ptr_data = sema.code.instructions.items(.data)[@intFromEnum(instrs[0])].pl_node;
     const elem_ptr_extra = sema.code.extraData(Zir.Inst.ElemPtrImm, first_elem_ptr_data.payload_index).data;
     const array_ptr = sema.resolveInst(elem_ptr_extra.ptr);
-    const array_ty = sema.typeOf(array_ptr).childType(zcu).optEuBaseType(zcu);
+    const array_ty = sema.typeOf(array_ptr).childType(zcu).restrictedOptEuBaseType(zcu);
     const array_len = array_ty.arrayLen(zcu);
 
     // Analagously to `validateStructInit`, our job is to handle default fields; either emitting AIR
@@ -4705,21 +4717,14 @@ fn failWithBadMemberAccess(
     const pt = sema.pt;
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    const kw_name = switch (agg_ty.zigTypeTag(zcu)) {
-        .@"union" => "union",
-        .@"struct" => "struct",
-        .@"opaque" => "opaque",
-        .@"enum" => "enum",
-        else => unreachable,
-    };
     if (agg_ty.typeDeclInst(zcu)) |inst| if ((inst.resolve(ip) orelse return error.AnalysisFail) == .main_struct_inst) {
         return sema.fail(block, field_src, "root source file struct '{f}' has no member named '{f}'", .{
             agg_ty.fmt(pt), field_name.fmt(ip),
         });
     };
 
-    return sema.fail(block, field_src, "{s} '{f}' has no member named '{f}'", .{
-        kw_name, agg_ty.fmt(pt), field_name.fmt(ip),
+    return sema.fail(block, field_src, "{t} '{f}' has no member named '{f}'", .{
+        agg_ty.zigTypeTag(zcu), agg_ty.fmt(pt), field_name.fmt(ip),
     });
 }
 
@@ -4777,13 +4782,7 @@ fn failWithBadUnionFieldAccess(
 pub fn addDeclaredHereNote(sema: *Sema, parent: *Zcu.ErrorMsg, decl_ty: Type) !void {
     const zcu = sema.pt.zcu;
     const src_loc = decl_ty.srcLocOrNull(zcu) orelse return;
-    const category = switch (decl_ty.zigTypeTag(zcu)) {
-        .@"union" => "union",
-        .@"struct" => "struct",
-        .@"enum" => "enum",
-        .@"opaque" => "opaque",
-        else => unreachable,
-    };
+    const category = if (zcu.intern_pool.isRestrictedType(decl_ty.toIntern())) "restricted type" else @tagName(decl_ty.zigTypeTag(zcu));
     try sema.errNote(src_loc, parent, "{s} declared here", .{category});
 }
 
@@ -7420,7 +7419,7 @@ fn zirArrayInitElemType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Compil
     const zcu = pt.zcu;
     const bin = sema.code.instructions.items(.data)[@intFromEnum(inst)].bin;
     const maybe_wrapped_indexable_ty = try sema.resolveTypeOrPoison(block, LazySrcLoc.unneeded, bin.lhs) orelse return .generic_poison_type;
-    const indexable_ty = maybe_wrapped_indexable_ty.optEuBaseType(zcu);
+    const indexable_ty = maybe_wrapped_indexable_ty.restrictedOptEuBaseType(zcu);
     assert(indexable_ty.isIndexable(zcu)); // validated by a previous instruction
     const elem_ty = switch (indexable_ty.zigTypeTag(zcu)) {
         .@"struct" => indexable_ty.fieldType(@intFromEnum(bin.rhs), zcu),
@@ -7434,7 +7433,7 @@ fn zirElemType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
     const zcu = pt.zcu;
     const un_node = sema.code.instructions.items(.data)[@intFromEnum(inst)].un_node;
     const maybe_wrapped_ptr_ty = try sema.resolveTypeOrPoison(block, LazySrcLoc.unneeded, un_node.operand) orelse return .generic_poison_type;
-    const ptr_ty = maybe_wrapped_ptr_ty.optEuBaseType(zcu);
+    const ptr_ty = maybe_wrapped_ptr_ty.restrictedOptEuBaseType(zcu);
     assert(ptr_ty.zigTypeTag(zcu) == .pointer); // validated by a previous instruction
     const elem_ty = ptr_ty.childType(zcu);
     if (elem_ty.toIntern() == .anyopaque_type) {
@@ -7465,7 +7464,7 @@ fn zirSplatOpResultType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Compil
     const un_node = sema.code.instructions.items(.data)[@intFromEnum(inst)].un_node;
 
     const raw_ty = try sema.resolveTypeOrPoison(block, LazySrcLoc.unneeded, un_node.operand) orelse return .generic_poison_type;
-    const vec_ty = raw_ty.optEuBaseType(zcu);
+    const vec_ty = raw_ty.restrictedOptEuBaseType(zcu);
 
     switch (vec_ty.zigTypeTag(zcu)) {
         .array, .vector => {},
@@ -9451,13 +9450,8 @@ fn zirBitcast(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
             return sema.failWithOwnedErrorMsg(block, msg);
         },
         .@"struct", .@"union" => if (dest_ty.containerLayout(zcu) == .auto) {
-            const container = switch (dest_ty.zigTypeTag(zcu)) {
-                .@"struct" => "struct",
-                .@"union" => "union",
-                else => unreachable,
-            };
-            return sema.fail(block, src, "cannot @bitCast to '{f}'; {s} does not have a guaranteed in-memory layout", .{
-                dest_ty.fmt(pt), container,
+            return sema.fail(block, src, "cannot @bitCast to '{f}'; {t} does not have a guaranteed in-memory layout", .{
+                dest_ty.fmt(pt), dest_ty.zigTypeTag(zcu),
             });
         },
         .array => {
@@ -9525,13 +9519,8 @@ fn zirBitcast(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
             return sema.failWithOwnedErrorMsg(block, msg);
         },
         .@"struct", .@"union" => if (operand_ty.containerLayout(zcu) == .auto) {
-            const container = switch (operand_ty.zigTypeTag(zcu)) {
-                .@"struct" => "struct",
-                .@"union" => "union",
-                else => unreachable,
-            };
-            return sema.fail(block, operand_src, "cannot @bitCast from '{f}'; {s} does not have a guaranteed in-memory layout", .{
-                operand_ty.fmt(pt), container,
+            return sema.fail(block, operand_src, "cannot @bitCast from '{f}'; {t} does not have a guaranteed in-memory layout", .{
+                operand_ty.fmt(pt), operand_ty.zigTypeTag(zcu),
             });
         },
         .array => {
@@ -17857,7 +17846,7 @@ fn zirRetImplicit(
 
     const operand = sema.resolveInst(inst_data.operand);
     const ret_ty_src = block.src(.{ .node_offset_fn_type_ret_ty = .zero });
-    const base_tag = sema.fn_ret_ty.optEuBaseType(zcu).zigTypeTag(zcu);
+    const base_tag = sema.fn_ret_ty.restrictedOptEuBaseType(zcu).zigTypeTag(zcu);
     if (base_tag == .noreturn) {
         const msg = msg: {
             const msg = try sema.errMsg(ret_ty_src, "function declared '{f}' implicitly returns", .{
@@ -18372,7 +18361,7 @@ fn zirStructInitEmptyResult(sema: *Sema, block: *Block, inst: Zir.Inst.Index, is
     };
 
     const init_ty = if (is_byref) ty: {
-        const ptr_ty = ty_operand.optEuBaseType(zcu);
+        const ptr_ty = ty_operand.restrictedOptEuBaseType(zcu);
         assert(ptr_ty.zigTypeTag(zcu) == .pointer); // validated by a previous instruction
         switch (ptr_ty.ptrSize(zcu)) {
             // Use a zero-length array for a slice or many-ptr result
@@ -18409,7 +18398,7 @@ fn zirStructInitEmptyResult(sema: *Sema, block: *Block, inst: Zir.Inst.Index, is
 
     try sema.ensureLayoutResolved(init_ty, src, .init);
 
-    const obj_ty = init_ty.optEuBaseType(zcu);
+    const obj_ty = init_ty.restrictedOptEuBaseType(zcu);
 
     const empty_ref = switch (obj_ty.zigTypeTag(zcu)) {
         .@"struct" => try sema.structInitEmpty(block, obj_ty, src, src),
@@ -18527,7 +18516,7 @@ fn zirStructInit(
         return sema.structInitAnon(block, src, inst, .typed_init, extra.data, extra.end, is_ref);
     };
     try sema.ensureLayoutResolved(result_ty, src, .init);
-    const resolved_ty = result_ty.optEuBaseType(zcu);
+    const resolved_ty = result_ty.restrictedOptEuBaseType(zcu);
 
     if (resolved_ty.zigTypeTag(zcu) == .@"struct") {
         // This logic must be synchronized with that in `zirStructInitEmpty`.
@@ -19065,7 +19054,7 @@ fn zirArrayInit(
         // The type wasn't actually known, so treat this as an anon array init.
         return sema.arrayInitAnon(block, src, args[1..], is_ref);
     };
-    const array_ty = result_ty.optEuBaseType(zcu);
+    const array_ty = result_ty.restrictedOptEuBaseType(zcu);
     const is_tuple = array_ty.zigTypeTag(zcu) == .@"struct";
     const sentinel_val = array_ty.sentinel(zcu);
 
@@ -19330,7 +19319,7 @@ fn zirStructInitFieldType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Comp
     const ty_src = block.nodeOffset(inst_data.src_node);
     const field_name_src = block.src(.{ .node_offset_field_name_init = inst_data.src_node });
     const wrapped_aggregate_ty = try sema.resolveTypeOrPoison(block, ty_src, extra.container_type) orelse return .generic_poison_type;
-    const aggregate_ty = wrapped_aggregate_ty.optEuBaseType(zcu);
+    const aggregate_ty = wrapped_aggregate_ty.restrictedOptEuBaseType(zcu);
     const zir_field_name = sema.code.nullTerminatedString(extra.name_start);
     const field_name = try ip.getOrPutString(gpa, io, pt.tid, zir_field_name, .no_embedded_nulls);
     try sema.ensureLayoutResolved(aggregate_ty, ty_src, .init);
@@ -20871,7 +20860,7 @@ fn zirRoundCast(
         .truncate => return sema.unaryMath(block, operand_src, operand, .trunc_float, Value.trunc),
         // zig fmt: on
         .exact => unreachable,
-    }).optEuBaseType(zcu);
+    }).restrictedOptEuBaseType(zcu);
 
     const operand_ty = sema.typeOf(operand);
 
@@ -25081,7 +25070,7 @@ fn zirFloatOpResultType(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.
     const operand_src = block.builtinCallArgSrc(extra.node, 0);
 
     const raw_ty = try sema.resolveTypeOrPoison(block, operand_src, extra.operand) orelse return .generic_poison_type;
-    const float_ty = raw_ty.optEuBaseType(zcu);
+    const float_ty = raw_ty.restrictedOptEuBaseType(zcu);
 
     switch (float_ty.scalarType(zcu).zigTypeTag(zcu)) {
         .float, .comptime_float => {},
@@ -25106,7 +25095,7 @@ fn zirRoundOpType(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDa
         return .generic_poison_type;
     };
 
-    const float_ty = dest_ty.optEuBaseType(zcu);
+    const float_ty = dest_ty.restrictedOptEuBaseType(zcu);
     switch (float_ty.scalarType(zcu).zigTypeTag(zcu)) {
         .float, .comptime_float => return .fromType(float_ty),
         else => return .comptime_float_type,
@@ -27479,21 +27468,21 @@ fn coerceExtra(
     if (dest_ty.eql(inst_ty, zcu))
         return inst;
 
-    const maybe_inst_val = sema.resolveValue(inst);
-
     // Restricted coercions
-    if (maybe_inst_val != null) {
-        if (dest_ty.unrestrictedType(zcu)) |dest_unrestricted_ty| {
-            if (sema.resolveValue(try sema.coerceExtra(block, dest_unrestricted_ty, inst, inst_src, opts))) |dest_unrestricted_val| {
-                return .fromIntern(try pt.intern(if (dest_unrestricted_val.isUndef(zcu)) .{
-                    .undef = dest_ty.toIntern(),
-                } else .{ .restricted_value = .{
-                    .ty = dest_ty.toIntern(),
-                    .unrestricted_value = dest_unrestricted_val.toIntern(),
-                } }));
-            }
-        }
+    if (dest_ty.unrestrictedType(zcu)) |dest_unrestricted_ty| {
+        const dest_unrestricted = try sema.coerceExtra(block, dest_unrestricted_ty, inst, inst_src, opts);
+        const dest_unrestricted_val = try sema.resolveConstValue(block, inst_src, dest_unrestricted, .{ .restricted_coercion = .{
+            .restricted_ty = dest_ty,
+            .unrestricted_ty = dest_unrestricted_ty,
+        } });
+        return .fromIntern(try pt.intern(if (dest_unrestricted_val.isUndef(zcu)) .{
+            .undef = dest_ty.toIntern(),
+        } else .{ .restricted_value = .{
+            .ty = dest_ty.toIntern(),
+            .unrestricted_value = dest_unrestricted_val.toIntern(),
+        } }));
     }
+    const maybe_inst_val = sema.resolveValue(inst);
     if (inst_ty.unrestrictedType(zcu)) |inst_unrestricted_ty| {
         const unrestricted_inst: Air.Inst.Ref = if (maybe_inst_val) |inst_val|
             .fromIntern(ip.indexToKey(inst_val.toIntern()).restricted_value.unrestricted_value)
@@ -28268,7 +28257,7 @@ const InMemoryCoercionResult = union(enum) {
                 for ([_]Type{ pair.actual, pair.wanted }) |restricted_type| {
                     try sema.addDeclaredHereNote(msg, restricted_type);
                     const unrestricted_type = restricted_type.unrestrictedType(pt.zcu) orelse continue;
-                    try sema.errNote(src, msg, "restricted type '{f}' is not guaranteed to have the same representation as its unrestricted type '{f}'", .{
+                    try sema.errNote(src, msg, "restricted type '{f}' has a different representation than unrestricted type '{f}'", .{
                         restricted_type.fmt(pt), unrestricted_type.fmt(pt),
                     });
                 }

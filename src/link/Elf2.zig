@@ -3837,7 +3837,7 @@ pub fn printNode(
                 val.fmtValue(.{ .zcu = zcu, .tid = tid }),
             });
         },
-        inline .lazy_code, .lazy_const_data => |lmi| try w.print("({f})", .{
+        inline .lazy_code, .lazy_const_data, .lazy_deferred_const_data => |lmi| try w.print("({f})", .{
             Value.fromInterned(lmi.lazySymbol(elf).key).fmtValue(
                 .{ .zcu = elf.base.comp.zcu.?, .tid = tid },
             ),

@@ -2701,15 +2701,18 @@ pub fn isTuple(ty: Type, zcu: *const Zcu) bool {
     };
 }
 
-/// Traverses optional child types and error union payloads until the type is neither of those.
+/// Traverses restricted unrestricted types, optional child types, and error union payloads until the type is neither of those.
 /// For `E!?u32`, returns `u32`; for `*u8`, returns `*u8`.
-pub fn optEuBaseType(ty: Type, zcu: *const Zcu) Type {
+pub fn restrictedOptEuBaseType(ty: Type, zcu: *const Zcu) Type {
     var cur = ty;
-    while (true) switch (cur.zigTypeTag(zcu)) {
-        .optional => cur = cur.optionalChild(zcu),
-        .error_union => cur = cur.errorUnionPayload(zcu),
-        else => return cur,
-    };
+    while (true) {
+        cur = ty.unrestrictedType(zcu) orelse cur;
+        switch (cur.zigTypeTag(zcu)) {
+            .optional => cur = cur.optionalChild(zcu),
+            .error_union => cur = cur.errorUnionPayload(zcu),
+            else => return cur,
+        }
+    }
 }
 
 pub fn toUnsigned(ty: Type, pt: Zcu.PerThread) !Type {
