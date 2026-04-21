@@ -31,15 +31,16 @@ dwarf: ?Dwarf = null,
 
 /// Table of tracked LazySymbols.
 lazy_syms: LazySymbolTable = .{},
+/// Table of tracked LazySymbols that are deferred until flush.
+deferred_lazy_syms: LazySymbolTable = .{},
 
 /// Table of tracked `Nav`s.
 navs: NavTable = .{},
+/// Table of tracked `Uav`s.
+uavs: UavTable = .{},
 
 /// TLS variables indexed by Atom.Index.
 tls_variables: TlsTable = .{},
-
-/// Table of tracked `Uav`s.
-uavs: UavTable = .{},
 
 debug_info_section_dirty: bool = false,
 debug_abbrev_section_dirty: bool = false,
@@ -246,12 +247,13 @@ pub fn deinit(self: *ZigObject, allocator: Allocator) void {
     }
     self.relocs.deinit(allocator);
 
+    self.lazy_syms.deinit(allocator);
+    self.deferred_lazy_syms.deinit(allocator);
+
     for (self.navs.values()) |*meta| {
         meta.exports.deinit(allocator);
     }
     self.navs.deinit(allocator);
-
-    self.lazy_syms.deinit(allocator);
 
     for (self.uavs.values()) |*meta| {
         meta.exports.deinit(allocator);
@@ -266,30 +268,22 @@ pub fn deinit(self: *ZigObject, allocator: Allocator) void {
 
 pub fn flush(self: *ZigObject, elf_file: *Elf, tid: Zcu.PerThread.Id) !void {
     // Handle any lazy symbols that were emitted by incremental compilation.
-    if (self.lazy_syms.getPtr(.anyerror_type)) |metadata| {
+    {
         const pt: Zcu.PerThread = .activate(elf_file.base.comp.zcu.?, tid);
         defer pt.deactivate();
 
-        // Most lazy symbols can be updated on first use, but
-        // anyerror needs to wait for everything to be flushed.
-        if (metadata.text_state != .unused) self.updateLazySymbol(
-            elf_file,
-            pt,
-            .{ .kind = .code, .ty = .anyerror_type },
-            metadata.text_symbol_index,
-        ) catch |err| switch (err) {
-            error.CodegenFail => return error.LinkFailure,
-            else => |e| return e,
-        };
-        if (metadata.rodata_state != .unused) self.updateLazySymbol(
-            elf_file,
-            pt,
-            .{ .kind = .const_data, .ty = .anyerror_type },
-            metadata.rodata_symbol_index,
-        ) catch |err| switch (err) {
-            error.CodegenFail => return error.LinkFailure,
-            else => |e| return e,
-        };
+        for (self.deferred_lazy_syms.values(), self.deferred_lazy_syms.keys()) |*metadata, key| {
+            assert(metadata.text_state == .unused);
+            if (metadata.rodata_state != .unused) self.updateLazySymbol(
+                elf_file,
+                pt,
+                .{ .kind = .deferred_const_data, .key = key },
+                metadata.rodata_symbol_index,
+            ) catch |err| switch (err) {
+                error.CodegenFail => return error.LinkFailure,
+                else => |e| return e,
+            };
+        }
     }
     for (self.lazy_syms.values()) |*metadata| {
         if (metadata.text_state != .unused) metadata.text_state = .flushed;
@@ -923,11 +917,10 @@ pub fn codeAlloc(self: *ZigObject, elf_file: *Elf, atom_index: Atom.Index) ![]u8
 pub fn getNavVAddr(
     self: *ZigObject,
     elf_file: *Elf,
-    pt: Zcu.PerThread,
     nav_index: InternPool.Nav.Index,
     reloc_info: link.File.RelocInfo,
 ) !u64 {
-    const zcu = pt.zcu;
+    const zcu = elf_file.base.comp.zcu.?;
     const ip = &zcu.intern_pool;
     const nav = ip.getNav(nav_index);
     log.debug("getNavVAddr {f}({d})", .{ nav.fqn.fmt(ip), nav_index });
@@ -991,6 +984,44 @@ pub fn getUavVAddr(
         },
     }
     return @intCast(vaddr);
+}
+
+pub fn getLazySymbolVAddr(
+    self: *ZigObject,
+    elf_file: *Elf,
+    pt: Zcu.PerThread,
+    lazy_sym: link.File.LazySymbol,
+    reloc_info: link.File.RelocInfo,
+) !u64 {
+    log.debug("getLazySymbolVAddr {t} {f}({d})", .{
+        lazy_sym.kind,
+        Value.fromInterned(lazy_sym.key).fmtValue(pt),
+        lazy_sym.key,
+    });
+    const this_sym_index = try self.getOrCreateMetadataForLazySymbol(elf_file, pt, lazy_sym);
+    const this_sym = self.symbol(this_sym_index);
+    const vaddr = this_sym.address(.{}, elf_file);
+    switch (reloc_info.parent) {
+        .none => unreachable,
+        .atom_index => |atom_index| {
+            const parent_atom = self.symbol(atom_index).atom(elf_file).?;
+            const r_type = relocation.encode(.abs, elf_file.getTarget().cpu.arch);
+            try parent_atom.addReloc(elf_file.base.comp.gpa, .{
+                .r_offset = reloc_info.offset,
+                .r_info = (@as(u64, @intCast(this_sym_index)) << 32) | r_type,
+                .r_addend = reloc_info.addend,
+            }, self);
+        },
+        .debug_output => |debug_output| switch (debug_output) {
+            .dwarf => |wip_nav| try wip_nav.infoExternalReloc(.{
+                .source_off = @intCast(reloc_info.offset),
+                .target_sym = this_sym_index,
+                .target_off = reloc_info.addend,
+            }),
+            .none => unreachable,
+        },
+    }
+    return @bitCast(vaddr);
 }
 
 pub fn lowerUav(
@@ -1063,12 +1094,16 @@ pub fn getOrCreateMetadataForLazySymbol(
     pt: Zcu.PerThread,
     lazy_sym: link.File.LazySymbol,
 ) !Symbol.Index {
-    const gop = try self.lazy_syms.getOrPut(pt.zcu.gpa, lazy_sym.ty);
-    errdefer _ = if (!gop.found_existing) self.lazy_syms.pop();
+    const lazy_syms = switch (lazy_sym.kind) {
+        .code, .const_data => &self.lazy_syms,
+        .deferred_const_data => &self.deferred_lazy_syms,
+    };
+    const gop = try lazy_syms.getOrPut(pt.zcu.gpa, lazy_sym.key);
+    errdefer _ = if (!gop.found_existing) lazy_syms.pop();
     if (!gop.found_existing) gop.value_ptr.* = .{};
     const symbol_index_ptr, const state_ptr = switch (lazy_sym.kind) {
         .code => .{ &gop.value_ptr.text_symbol_index, &gop.value_ptr.text_state },
-        .const_data => .{ &gop.value_ptr.rodata_symbol_index, &gop.value_ptr.rodata_state },
+        .const_data, .deferred_const_data => .{ &gop.value_ptr.rodata_symbol_index, &gop.value_ptr.rodata_state },
     };
     switch (state_ptr.*) {
         .unused => symbol_index_ptr.* = try self.newSymbolWithAtom(pt.zcu.gpa, 0),
@@ -1077,8 +1112,10 @@ pub fn getOrCreateMetadataForLazySymbol(
     }
     state_ptr.* = .pending_flush;
     const symbol_index = symbol_index_ptr.*;
-    // anyerror needs to be deferred until flush
-    if (lazy_sym.ty != .anyerror_type) try self.updateLazySymbol(elf_file, pt, lazy_sym, symbol_index);
+    switch (lazy_sym.kind) {
+        .code, .const_data => try self.updateLazySymbol(elf_file, pt, lazy_sym, symbol_index),
+        .deferred_const_data => {},
+    }
     return symbol_index;
 }
 
@@ -1726,20 +1763,18 @@ fn updateLazySymbol(
     self: *ZigObject,
     elf_file: *Elf,
     pt: Zcu.PerThread,
-    sym: link.File.LazySymbol,
+    lazy_sym: link.File.LazySymbol,
     symbol_index: Symbol.Index,
 ) !void {
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
 
-    var required_alignment: InternPool.Alignment = .none;
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
 
     const name_str_index = blk: {
-        const name = try std.fmt.allocPrint(gpa, "__lazy_{s}_{f}", .{
-            @tagName(sym.kind),
-            Type.fromInterned(sym.ty).fmt(pt),
+        const name = try std.fmt.allocPrint(gpa, "__lazy_{t}_{f}", .{
+            lazy_sym.kind, Value.fromInterned(lazy_sym.key).fmtValue(pt),
         });
         defer gpa.free(name);
         break :blk try self.strtab.insert(gpa, name);
@@ -1748,9 +1783,8 @@ fn updateLazySymbol(
     codegen.generateLazySymbol(
         &elf_file.base,
         pt,
-        Type.fromInterned(sym.ty).srcLocOrNull(zcu) orelse .unneeded,
-        sym,
-        &required_alignment,
+        Type.fromInterned(lazy_sym.key).srcLocOrNull(zcu) orelse .unneeded,
+        lazy_sym,
         &aw.writer,
         .none,
         .{ .atom_index = symbol_index },
@@ -1760,7 +1794,7 @@ fn updateLazySymbol(
     };
     const code = aw.written();
 
-    const output_section_index = switch (sym.kind) {
+    const output_section_index = switch (lazy_sym.kind) {
         .code => if (self.text_index) |sym_index|
             self.symbol(sym_index).outputShndx(elf_file).?
         else osec: {
@@ -1773,7 +1807,7 @@ fn updateLazySymbol(
             self.text_index = try self.addSectionSymbol(gpa, try self.addString(gpa, ".text"), osec);
             break :osec osec;
         },
-        .const_data => if (self.rodata_index) |sym_index|
+        .const_data, .deferred_const_data => if (self.rodata_index) |sym_index|
             self.symbol(sym_index).outputShndx(elf_file).?
         else osec: {
             const osec = try elf_file.addSection(.{
@@ -1786,24 +1820,24 @@ fn updateLazySymbol(
             break :osec osec;
         },
     };
-    const local_sym = self.symbol(symbol_index);
-    local_sym.name_offset = name_str_index;
-    const local_esym = &self.symtab.items(.elf_sym)[local_sym.esym_index];
-    local_esym.st_name = name_str_index;
-    local_esym.st_info |= elf.STT_OBJECT;
-    local_esym.st_size = code.len;
-    const atom_ptr = local_sym.atom(elf_file).?;
+    const sym = self.symbol(symbol_index);
+    sym.name_offset = name_str_index;
+    const esym = &self.symtab.items(.elf_sym)[sym.esym_index];
+    esym.st_name = name_str_index;
+    esym.st_info |= elf.STT_OBJECT;
+    esym.st_size = code.len;
+    const atom_ptr = sym.atom(elf_file).?;
     atom_ptr.alive = true;
     atom_ptr.name_offset = name_str_index;
-    atom_ptr.alignment = required_alignment;
+    atom_ptr.alignment = codegen.getLazySymbolInfo(.attributes, lazy_sym, zcu).required_alignment;
     atom_ptr.size = code.len;
     atom_ptr.output_section_index = output_section_index;
 
     try self.allocateAtom(atom_ptr, true, elf_file);
     errdefer self.freeNavMetadata(elf_file, symbol_index);
 
-    local_sym.value = 0;
-    local_esym.st_value = 0;
+    sym.value = 0;
+    esym.st_value = 0;
 
     try elf_file.pwriteAll(code, atom_ptr.offset(elf_file));
 }

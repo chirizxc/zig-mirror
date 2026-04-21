@@ -3631,11 +3631,11 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
             },
         },
         .restricted_ptr_type => |restricted_ptr_type| switch (Type.restrictedReprByZirIndex(restricted_ptr_type.zir_index, zcu)) {
-            .double_pointer => continue :key .{ .ptr_type = .{
+            .indirect => continue :key .{ .ptr_type = .{
                 .child = restricted_ptr_type.unrestricted_ptr_type,
                 .flags = .{ .is_const = true },
             } },
-            .single_pointer => continue :key .{ .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type },
+            .direct => continue :key .{ .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type },
         },
         .array_type => |array_type| {
             const array_child_type: Type = .fromInterned(array_type.child);

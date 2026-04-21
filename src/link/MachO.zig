@@ -3116,8 +3116,8 @@ pub fn freeNav(self: *MachO, nav: InternPool.Nav.Index) void {
     return self.getZigObject().?.freeNav(nav);
 }
 
-pub fn getNavVAddr(self: *MachO, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index, reloc_info: link.File.RelocInfo) !u64 {
-    return self.getZigObject().?.getNavVAddr(self, pt, nav_index, reloc_info);
+pub fn getNavVAddr(self: *MachO, nav_index: InternPool.Nav.Index, reloc_info: link.File.RelocInfo) !u64 {
+    return self.getZigObject().?.getNavVAddr(self, nav_index, reloc_info);
 }
 
 pub fn lowerUav(
@@ -3132,6 +3132,10 @@ pub fn lowerUav(
 
 pub fn getUavVAddr(self: *MachO, uav: InternPool.Index, reloc_info: link.File.RelocInfo) !u64 {
     return self.getZigObject().?.getUavVAddr(self, uav, reloc_info);
+}
+
+pub fn getLazySymbolVAddr(self: *MachO, pt: Zcu.PerThread, lazy_sym: link.File.LazySymbol, reloc_info: link.File.RelocInfo) !u64 {
+    return self.getZigObject().?.getLazySymbolVAddr(self, pt, lazy_sym, reloc_info);
 }
 
 pub fn getGlobalSymbol(self: *MachO, name: []const u8, lib_name: ?[]const u8) !u32 {

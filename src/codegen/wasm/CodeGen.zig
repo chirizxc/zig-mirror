@@ -6730,11 +6730,11 @@ fn airUnwrapRestricted(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerEr
     const unrestricted_ty = ty_op.ty.toType();
     const restricted_ty = cg.typeOf(ty_op.operand);
     const result = result: switch (restricted_ty.restrictedRepr(zcu)) {
-        .double_pointer => {
+        .indirect => {
             _ = safety; // TODO
             break :result try cg.load(operand, unrestricted_ty, 0);
         },
-        .single_pointer => cg.reuseOperand(ty_op.operand, operand),
+        .direct => cg.reuseOperand(ty_op.operand, operand),
     };
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }

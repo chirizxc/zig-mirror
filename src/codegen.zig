@@ -210,7 +210,7 @@ pub fn generateLazyFunction(
     debug_output: link.File.DebugInfoOutput,
 ) (CodeGenError || std.Io.Writer.Error)!void {
     const zcu = pt.zcu;
-    const target = if (Type.fromInterned(lazy_sym.ty).typeDeclInstAllowGeneratedTag(zcu)) |inst_index|
+    const target = if (Type.fromInterned(lazy_sym.key).typeDeclInstAllowGeneratedTag(zcu)) |inst_index|
         &zcu.fileByIndex(inst_index.resolveFile(&zcu.intern_pool)).mod.?.resolved_target.result
     else
         zcu.getTarget();
@@ -223,13 +223,118 @@ pub fn generateLazyFunction(
     }
 }
 
+const LazySymbolStructure = struct {
+    parent: ?link.File.LazySymbol = null,
+    modify: ?Modification = null,
+
+    pub const Modification = struct {
+        lazy_sym: link.File.LazySymbol,
+        operation: Operation,
+
+        pub const Operation = enum {
+            ptr_inc,
+
+            pub fn apply(operation: Operation, slice: []u8, endian: std.builtin.Endian) void {
+                switch (operation) {
+                    .ptr_inc => switch (slice.len) {
+                        else => unreachable,
+                        2 => std.mem.writeInt(u16, slice[0..2], std.mem.readInt(u16, slice[0..2], endian) + 1, endian),
+                        4 => std.mem.writeInt(u32, slice[0..4], std.mem.readInt(u32, slice[0..4], endian) + 1, endian),
+                        8 => std.mem.writeInt(u64, slice[0..8], std.mem.readInt(u64, slice[0..8], endian) + 1, endian),
+                    },
+                }
+            }
+        };
+    };
+};
+pub const LazySymbolAttributes = struct {
+    header: bool = false,
+    required_alignment: Alignment,
+    size: ?u64 = null,
+};
+pub fn getLazySymbolInfo(
+    comptime kind: enum { structure, attributes },
+    lazy_sym: link.File.LazySymbol,
+    zcu: *Zcu,
+) switch (kind) {
+    .structure => LazySymbolStructure,
+    .attributes => LazySymbolAttributes,
+} {
+    const ip = &zcu.intern_pool;
+    return switch (lazy_sym.kind) {
+        .code => switch (kind) {
+            .structure => .{},
+            .attributes => {
+                const comp = zcu.comp;
+                const target = &comp.root_mod.resolved_target.result;
+                return .{ .required_alignment = switch (comp.root_mod.optimize_mode) {
+                    .Debug, .ReleaseSafe, .ReleaseFast => target_util.defaultFunctionAlignment(target),
+                    .ReleaseSmall => target_util.minFunctionAlignment(target),
+                } };
+            },
+        },
+        .const_data => switch (ip.indexToKey(lazy_sym.key)) {
+            else => unreachable,
+            .enum_type => switch (kind) {
+                .structure => .{},
+                .attributes => .{ .required_alignment = .@"1" },
+            },
+            .restricted_ptr_type => |restricted_ptr_type| switch (kind) {
+                .structure => .{},
+                .attributes => {
+                    const restricted_ptr_ty: Type = .fromInterned(lazy_sym.key);
+                    const unrestricted_ptr_ty: Type =
+                        .fromInterned(restricted_ptr_type.unrestricted_ptr_type);
+                    return .{ .required_alignment = restricted_ptr_ty.abiAlignment(zcu)
+                        .maxStrict(unrestricted_ptr_ty.abiAlignment(zcu)) };
+                },
+            },
+        },
+        .deferred_const_data => switch (lazy_sym.key) {
+            else => unreachable,
+            .anyerror_type => switch (kind) {
+                .structure => .{},
+                .attributes => .{ .required_alignment = .@"4" },
+            },
+            _ => switch (ip.indexToKey(lazy_sym.key)) {
+                else => unreachable,
+                .ptr => |ptr| switch (ip.indexToKey(ptr.ty)) {
+                    else => unreachable,
+                    .restricted_ptr_type => |restricted_ptr_type| switch (kind) {
+                        .structure => .{ .parent = .{ .kind = .const_data, .key = ptr.ty }, .modify = .{
+                            .lazy_sym = .{ .kind = .deferred_const_data, .key = ptr.ty },
+                            .operation = .ptr_inc,
+                        } },
+                        .attributes => {
+                            const unrestricted_ptr_ty: Type =
+                                .fromInterned(restricted_ptr_type.unrestricted_ptr_type);
+                            return .{
+                                .required_alignment = unrestricted_ptr_ty.abiAlignment(zcu),
+                                .size = unrestricted_ptr_ty.abiSize(zcu),
+                            };
+                        },
+                    },
+                },
+                .restricted_ptr_type => switch (kind) {
+                    .structure => .{ .parent = .{ .kind = .const_data, .key = lazy_sym.key } },
+                    .attributes => {
+                        const restricted_ptr_ty: Type = .fromInterned(lazy_sym.key);
+                        return .{
+                            .header = true,
+                            .required_alignment = restricted_ptr_ty.abiAlignment(zcu),
+                            .size = restricted_ptr_ty.abiSize(zcu),
+                        };
+                    },
+                },
+            },
+        },
+    };
+}
 pub fn generateLazySymbol(
     bin_file: *link.File,
     pt: Zcu.PerThread,
     src_loc: Zcu.LazySrcLoc,
     lazy_sym: link.File.LazySymbol,
-    // TODO don't use an "out" parameter like this; put it in the result instead
-    alignment: *Alignment,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
     reloc_parent: link.File.RelocInfo.Parent,
@@ -243,51 +348,81 @@ pub fn generateLazySymbol(
     const target = &comp.root_mod.resolved_target.result;
     const endian = target.cpu.arch.endian();
 
-    log.debug("generateLazySymbol: kind = {s}, ty = {f}", .{
+    log.debug("generateLazySymbol: kind = {s}, key = {f}", .{
         @tagName(lazy_sym.kind),
-        Type.fromInterned(lazy_sym.ty).fmt(pt),
+        Value.fromInterned(lazy_sym.key).fmtValue(pt),
     });
 
-    if (lazy_sym.kind == .code) {
-        alignment.* = target_util.defaultFunctionAlignment(target);
-        return generateLazyFunction(bin_file, pt, src_loc, lazy_sym, reloc_parent.atom_index, w, debug_output);
+    switch (lazy_sym.kind) {
+        .code => return generateLazyFunction(bin_file, pt, src_loc, lazy_sym, reloc_parent.atom_index, w, debug_output),
+        .const_data => switch (ip.indexToKey(lazy_sym.key)) {
+            .enum_type => {
+                const enum_ty: Type = .fromInterned(lazy_sym.key);
+                const tag_names = enum_ty.enumFields(zcu);
+                for (0..tag_names.len) |tag_index| {
+                    const tag_name = tag_names.get(ip)[tag_index].toSlice(ip);
+                    try w.rebase(w.end, tag_name.len + 1);
+                    w.writeAll(tag_name) catch unreachable;
+                    w.writeByte(0) catch unreachable;
+                }
+                return;
+            },
+            .restricted_ptr_type => return,
+            else => {},
+        },
+        .deferred_const_data => switch (lazy_sym.key) {
+            .anyerror_type => {
+                const err_names = ip.global_error_set.getNamesFromMainThread();
+                const strings_start: u32 = @intCast(4 * (1 + err_names.len + @intFromBool(err_names.len > 0)));
+                var string_index = strings_start;
+                try w.rebase(w.end, string_index);
+                w.writeInt(u32, @intCast(err_names.len), endian) catch unreachable;
+                if (err_names.len > 0) {
+                    for (err_names) |err_name_nts| {
+                        w.writeInt(u32, string_index, endian) catch unreachable;
+                        string_index += @intCast(err_name_nts.toSlice(ip).len + 1);
+                    }
+                    w.writeInt(u32, string_index, endian) catch unreachable;
+                    try w.rebase(w.end, string_index - strings_start);
+                    for (err_names) |err_name_nts| {
+                        w.writeAll(err_name_nts.toSlice(ip)) catch unreachable;
+                        w.writeByte(0) catch unreachable;
+                    }
+                }
+                return;
+            },
+            _ => switch (ip.indexToKey(lazy_sym.key)) {
+                .ptr => |ptr| switch (ip.indexToKey(ptr.ty)) {
+                    .restricted_ptr_type => |restricted_ptr_type| return lowerPtr(
+                        bin_file,
+                        pt,
+                        src_loc,
+                        try ip.getCoerced(
+                            comp.gpa,
+                            comp.io,
+                            pt.tid,
+                            lazy_sym.key,
+                            restricted_ptr_type.unrestricted_ptr_type,
+                        ),
+                        w,
+                        reloc_parent,
+                        0,
+                    ),
+                    else => {},
+                },
+                .restricted_ptr_type => return w.splatByteAll(0, @divExact(zcu.getTarget().ptrBitWidth(), 8)),
+                else => {},
+            },
+            else => {},
+        },
     }
-
-    if (lazy_sym.ty == .anyerror_type) {
-        alignment.* = .@"4";
-        const err_names = ip.global_error_set.getNamesFromMainThread();
-        const strings_start: u32 = @intCast(4 * (1 + err_names.len + @intFromBool(err_names.len > 0)));
-        var string_index = strings_start;
-        try w.rebase(w.end, string_index);
-        w.writeInt(u32, @intCast(err_names.len), endian) catch unreachable;
-        if (err_names.len == 0) return;
-        for (err_names) |err_name_nts| {
-            w.writeInt(u32, string_index, endian) catch unreachable;
-            string_index += @intCast(err_name_nts.toSlice(ip).len + 1);
-        }
-        w.writeInt(u32, string_index, endian) catch unreachable;
-        try w.rebase(w.end, string_index - strings_start);
-        for (err_names) |err_name_nts| {
-            w.writeAll(err_name_nts.toSlice(ip)) catch unreachable;
-            w.writeByte(0) catch unreachable;
-        }
-    } else if (Type.fromInterned(lazy_sym.ty).zigTypeTag(zcu) == .@"enum") {
-        alignment.* = .@"1";
-        const enum_ty = Type.fromInterned(lazy_sym.ty);
-        const tag_names = enum_ty.enumFields(zcu);
-        for (0..tag_names.len) |tag_index| {
-            const tag_name = tag_names.get(ip)[tag_index].toSlice(ip);
-            try w.rebase(w.end, tag_name.len + 1);
-            w.writeAll(tag_name) catch unreachable;
-            w.writeByte(0) catch unreachable;
-        }
-    } else if (Type.fromInterned(lazy_sym.ty).unrestrictedType(zcu)) |unrestricted_ptr_ty| {
-        alignment.* = unrestricted_ptr_ty.abiAlignment(zcu);
-        try w.splatByteAll(0, @divExact(zcu.getTarget().ptrBitWidth(), 8)); // to be filled in later
-    } else {
-        return zcu.codegenFailType(lazy_sym.ty, "TODO implement generateLazySymbol for {s} {f}", .{
-            @tagName(lazy_sym.kind), Type.fromInterned(lazy_sym.ty).fmt(pt),
-        });
+    switch (ip.typeOf(lazy_sym.key)) {
+        .type_type => return zcu.codegenFailType(lazy_sym.key, "TODO implement generateLazySymbol for {t} {f}", .{
+            lazy_sym.kind, Value.fromInterned(lazy_sym.key).fmtValue(pt),
+        }),
+        else => std.debug.panic("TODO implement generateLazySymbol for {t} {f}", .{
+            lazy_sym.kind, Value.fromInterned(lazy_sym.key).fmtValue(pt),
+        }),
     }
 }
 
@@ -441,7 +576,10 @@ pub fn generateSymbol(
                 128 => try w.writeInt(u128, @bitCast(f128_val), endian),
             },
         },
-        .ptr => try lowerPtr(bin_file, pt, src_loc, val.toIntern(), w, reloc_parent, 0),
+        .ptr => switch (ty.restrictedRepr(zcu)) {
+            .indirect => try lowerLazySymbolRef(bin_file, pt, .{ .kind = .deferred_const_data, .key = val.toIntern() }, w, reloc_parent, 0),
+            .direct => try lowerPtr(bin_file, pt, src_loc, val.toIntern(), w, reloc_parent, 0),
+        },
         .slice => |slice| {
             try generateSymbol(bin_file, pt, src_loc, Value.fromInterned(slice.ptr), w, reloc_parent);
             try generateSymbol(bin_file, pt, src_loc, Value.fromInterned(slice.len), w, reloc_parent);
@@ -838,7 +976,7 @@ fn lowerNavRef(
         else => {},
     }
 
-    const vaddr = lf.getNavVAddr(pt, nav_index, .{
+    const vaddr = lf.getNavVAddr(nav_index, .{
         .parent = reloc_parent,
         .offset = w.end,
         .addend = @intCast(offset),
@@ -906,7 +1044,7 @@ pub fn genNavRef(
             .link_once => unreachable,
         }
     } else if (lf.cast(.elf2)) |elf| {
-        return .{ .sym_index = @intFromEnum(elf.navSymbol(zcu, nav_index) catch |err| switch (err) {
+        return .{ .sym_index = @intFromEnum(elf.navSymbol(nav_index) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             else => |e| return .{ .fail = try ErrorMsg.create(
                 zcu.gpa,
@@ -937,10 +1075,35 @@ pub fn genNavRef(
             .link_once => unreachable,
         }
     } else if (lf.cast(.coff2)) |coff| {
-        return .{ .sym_index = @intFromEnum(try coff.navSymbol(zcu, nav_index)) };
+        return .{ .sym_index = @intFromEnum(try coff.navSymbol(nav_index)) };
     } else {
         const msg = try ErrorMsg.create(zcu.gpa, src_loc, "TODO genNavRef for target {}", .{target});
         return .{ .fail = msg };
+    }
+}
+
+fn lowerLazySymbolRef(
+    lf: *link.File,
+    pt: Zcu.PerThread,
+    lazy_sym: link.File.LazySymbol,
+    w: *std.Io.Writer,
+    reloc_parent: link.File.RelocInfo.Parent,
+    offset: u64,
+) (GenerateSymbolError || std.Io.Writer.Error)!void {
+    const vaddr = lf.getLazySymbolVAddr(pt, lazy_sym, .{
+        .parent = reloc_parent,
+        .offset = w.end,
+        .addend = @intCast(offset),
+    }) catch @panic("TODO rework getNavVAddr");
+
+    const target = &lf.comp.root_mod.resolved_target.result;
+    const ptr_width_bytes = @divExact(target.ptrBitWidth(), 8);
+    const endian = target.cpu.arch.endian();
+    switch (ptr_width_bytes) {
+        2 => try w.writeInt(u16, @intCast(vaddr), endian),
+        4 => try w.writeInt(u32, @intCast(vaddr), endian),
+        8 => try w.writeInt(u64, vaddr, endian),
+        else => unreachable,
     }
 }
 
@@ -1006,6 +1169,7 @@ pub fn genTypedValue(
             } },
             .fail => |em| .{ .fail = em },
         },
+        .lea_lazy_sym => unreachable, // `Zcu.Feature.restricted_types` is not supported by this code path
     };
 }
 
@@ -1018,6 +1182,7 @@ const LowerResult = union(enum) {
     lea_nav: InternPool.Nav.Index,
     load_uav: InternPool.Key.Ptr.BaseAddr.Uav,
     lea_uav: InternPool.Key.Ptr.BaseAddr.Uav,
+    lea_lazy_sym: link.File.LazySymbol,
 };
 
 pub fn lowerValue(pt: Zcu.PerThread, val: Value, target: *const std.Target) Allocator.Error!LowerResult {
@@ -1034,38 +1199,41 @@ pub fn lowerValue(pt: Zcu.PerThread, val: Value, target: *const std.Target) Allo
         .bool => return .{ .immediate = @intFromBool(val.toBool()) },
         .pointer => switch (ty.ptrSize(zcu)) {
             .slice => {},
-            .one, .many, .c => {
-                const ptr = ip.indexToKey(val.toIntern()).ptr;
-                if (ptr.base_addr == .int) return .{ .immediate = ptr.byte_offset };
-                if (ptr.byte_offset == 0) switch (ptr.base_addr) {
-                    .int => unreachable, // handled above
+            .one, .many, .c => switch (ty.restrictedRepr(zcu)) {
+                .indirect => return .{ .lea_lazy_sym = .{ .kind = .deferred_const_data, .key = val.toIntern() } },
+                .direct => {
+                    const ptr = ip.indexToKey(val.toIntern()).ptr;
+                    if (ptr.base_addr == .int) return .{ .immediate = ptr.byte_offset };
+                    if (ptr.byte_offset == 0) switch (ptr.base_addr) {
+                        .int => unreachable, // handled above
 
-                    .nav => |nav_index| {
-                        const nav = ip.getNav(nav_index);
-                        const nav_ty: Type = .fromInterned(nav.resolved.?.type);
-                        if (nav_ty.isRuntimeFnOrHasRuntimeBits(zcu) or nav.getExtern(ip) != null) {
-                            return .{ .lea_nav = nav_index };
+                        .nav => |nav_index| {
+                            const nav = ip.getNav(nav_index);
+                            const nav_ty: Type = .fromInterned(nav.resolved.?.type);
+                            if (nav_ty.isRuntimeFnOrHasRuntimeBits(zcu) or nav.getExtern(ip) != null) {
+                                return .{ .lea_nav = nav_index };
+                            } else {
+                                // Create the 0xaa bit pattern...
+                                const undef_ptr_bits: u64 = @intCast((@as(u66, 1) << @intCast(target.ptrBitWidth() + 1)) / 3);
+                                // ...but align the pointer
+                                const alignment = zcu.navAlignment(nav_index);
+                                return .{ .immediate = alignment.forward(undef_ptr_bits) };
+                            }
+                        },
+
+                        .uav => |uav| if (Value.fromInterned(uav.val).typeOf(zcu).isRuntimeFnOrHasRuntimeBits(zcu)) {
+                            return .{ .lea_uav = uav };
                         } else {
                             // Create the 0xaa bit pattern...
                             const undef_ptr_bits: u64 = @intCast((@as(u66, 1) << @intCast(target.ptrBitWidth() + 1)) / 3);
                             // ...but align the pointer
-                            const alignment = zcu.navAlignment(nav_index);
+                            const alignment = Type.fromInterned(uav.orig_ty).ptrAlignment(zcu);
                             return .{ .immediate = alignment.forward(undef_ptr_bits) };
-                        }
-                    },
+                        },
 
-                    .uav => |uav| if (Value.fromInterned(uav.val).typeOf(zcu).isRuntimeFnOrHasRuntimeBits(zcu)) {
-                        return .{ .lea_uav = uav };
-                    } else {
-                        // Create the 0xaa bit pattern...
-                        const undef_ptr_bits: u64 = @intCast((@as(u66, 1) << @intCast(target.ptrBitWidth() + 1)) / 3);
-                        // ...but align the pointer
-                        const alignment = Type.fromInterned(uav.orig_ty).ptrAlignment(zcu);
-                        return .{ .immediate = alignment.forward(undef_ptr_bits) };
-                    },
-
-                    else => {},
-                };
+                        else => {},
+                    };
+                },
             },
         },
         .int => {

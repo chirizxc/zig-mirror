@@ -1350,14 +1350,17 @@ pub fn unrestrictedType(ty: Type, zcu: *const Zcu) ?Type {
     };
 }
 
-const RestrictedRepr = enum { double_pointer, single_pointer };
+const RestrictedRepr = enum { indirect, direct };
 pub fn restrictedRepr(ty: Type, zcu: *const Zcu) RestrictedRepr {
-    return restrictedReprByZirIndex(zcu.intern_pool.indexToKey(ty.toIntern()).restricted_ptr_type.zir_index, zcu);
+    return switch (zcu.intern_pool.indexToKey(ty.toIntern())) {
+        .restricted_ptr_type => |restricted_ptr_type| restrictedReprByZirIndex(restricted_ptr_type.zir_index, zcu),
+        else => .direct,
+    };
 }
 pub fn restrictedReprByZirIndex(zir_index: InternPool.TrackedInst.Index, zcu: *const Zcu) RestrictedRepr {
     return switch (zcu.fileByIndex(zir_index.resolveFile(&zcu.intern_pool)).mod.?.optimize_mode) {
-        .Debug, .ReleaseSafe => .double_pointer,
-        .ReleaseFast, .ReleaseSmall => .single_pointer,
+        .Debug, .ReleaseSafe => if (zcu.backendSupportsFeature(.restricted_types)) .indirect else .direct,
+        .ReleaseFast, .ReleaseSmall => .direct,
     };
 }
 
@@ -2670,6 +2673,7 @@ pub fn srcLocOrNull(ty: Type, zcu: *Zcu) ?Zcu.LazySrcLoc {
     const ip = &zcu.intern_pool;
     return .{
         .base_node_inst = switch (ip.indexToKey(ty.toIntern())) {
+            .restricted_ptr_type => |restricted_ptr_type| restricted_ptr_type.zir_index,
             .struct_type, .union_type, .opaque_type, .enum_type => |info| switch (info) {
                 .declared => |d| d.zir_index,
                 .reified => |r| r.zir_index,

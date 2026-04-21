@@ -134,6 +134,7 @@ const RenderedDecl = struct {
     code: String,
     ctype_deps: CTypeDependencies,
     need_uavs: std.AutoArrayHashMapUnmanaged(InternPool.Index, Alignment),
+    need_restricted: std.array_hash_map.Auto(InternPool.Index, void),
     need_tag_name_funcs: std.AutoArrayHashMapUnmanaged(InternPool.Index, void),
     need_never_tail_funcs: std.AutoArrayHashMapUnmanaged(InternPool.Nav.Index, void),
     need_never_inline_funcs: std.AutoArrayHashMapUnmanaged(InternPool.Nav.Index, void),
@@ -143,6 +144,7 @@ const RenderedDecl = struct {
         .code = .empty,
         .ctype_deps = .empty,
         .need_uavs = .empty,
+        .need_restricted = .empty,
         .need_tag_name_funcs = .empty,
         .need_never_tail_funcs = .empty,
         .need_never_inline_funcs = .empty,
@@ -150,6 +152,7 @@ const RenderedDecl = struct {
 
     fn deinit(rd: *RenderedDecl, gpa: Allocator) void {
         rd.need_uavs.deinit(gpa);
+        rd.need_restricted.deinit(gpa);
         rd.need_tag_name_funcs.deinit(gpa);
         rd.need_never_tail_funcs.deinit(gpa);
         rd.need_never_inline_funcs.deinit(gpa);
@@ -162,6 +165,7 @@ const RenderedDecl = struct {
     fn clearRetainingCapacity(rd: *RenderedDecl) void {
         rd.fwd_decl = undefined;
         rd.code = undefined;
+        rd.need_restricted.clearRetainingCapacity();
         rd.need_uavs.clearRetainingCapacity();
         rd.need_tag_name_funcs.clearRetainingCapacity();
         rd.need_never_tail_funcs.clearRetainingCapacity();
@@ -501,6 +505,7 @@ pub fn updateFunc(
         .code = try c.addString(&.{ mir.c.code_header, mir.c.code }),
         .ctype_deps = try c.addCTypeDependencies(pt, &mir.c.ctype_deps),
         .need_uavs = mir.c.need_uavs.move(),
+        .need_restricted = mir.c.need_restricted.move(),
         .need_tag_name_funcs = mir.c.need_tag_name_funcs.move(),
         .need_never_tail_funcs = mir.c.need_never_tail_funcs.move(),
         .need_never_inline_funcs = mir.c.need_never_inline_funcs.move(),
@@ -576,11 +581,13 @@ pub fn updateNav(
             .expected_block = null,
             .ctype_deps = .empty,
             .uavs = rendered_decl.need_uavs.move(),
+            .need_restricted = .empty,
         };
 
         defer {
             rendered_decl.need_uavs = dg.uavs.move();
             dg.ctype_deps.deinit(gpa);
+            dg.need_restricted.deinit(gpa);
         }
 
         rendered_decl.fwd_decl = fwd_decl: {
@@ -618,6 +625,7 @@ pub fn updateNav(
         };
 
         rendered_decl.ctype_deps = try c.addCTypeDependencies(pt, &dg.ctype_deps);
+        rendered_decl.need_restricted = dg.need_restricted.move();
     }
 
     const old_uavs_len = c.uavs.count();
@@ -667,10 +675,12 @@ fn updateUav(
         .expected_block = null,
         .ctype_deps = .empty,
         .uavs = .empty,
+        .need_restricted = .empty,
     };
     defer {
         rendered_decl.need_uavs = dg.uavs.move();
         dg.ctype_deps.deinit(gpa);
+        dg.need_restricted.deinit(gpa);
     }
 
     rendered_decl.fwd_decl = fwd_decl: {
@@ -716,6 +726,7 @@ fn updateUav(
     };
 
     rendered_decl.ctype_deps = try c.addCTypeDependencies(pt, &dg.ctype_deps);
+    rendered_decl.need_restricted = dg.need_restricted.move();
 }
 
 pub fn updateLineNumber(c: *C, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index) error{}!void {
@@ -795,6 +806,10 @@ pub fn flush(c: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Prog
     var need_aligned_types: std.AutoArrayHashMapUnmanaged(link.ConstPool.Index, u64) = .empty;
     defer need_aligned_types.deinit(gpa);
 
+    var need_restricted: std.array_hash_map.Auto(InternPool.Index, std.array_hash_map.Auto(InternPool.Index, void)) = .empty;
+    defer need_restricted.deinit(gpa);
+    defer for (need_restricted.values()) |*values| values.deinit(gpa);
+
     var need_tag_name_funcs: std.AutoArrayHashMapUnmanaged(InternPool.Index, void) = .empty;
     defer need_tag_name_funcs.deinit(gpa);
 
@@ -816,7 +831,7 @@ pub fn flush(c: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Prog
         if (!gop.found_existing) gop.value_ptr.* = .none;
     }
 
-    // For every referenced NAV, some UAVs, C types, and lazy functions may be referenced.
+    // For every referenced NAV, some UAVs, restricted types, C types, and lazy functions may be referenced.
     for (need_navs.keys()) |nav| {
         const rendered = c.navs.getPtr(nav).?;
         try mergeNeededCTypes(
@@ -827,6 +842,7 @@ pub fn flush(c: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Prog
             &rendered.ctype_deps,
         );
         try mergeNeededUavs(zcu, &need_uavs, &rendered.need_uavs);
+        try mergeNeededRestricted(zcu, &need_restricted, &rendered.need_restricted);
 
         try need_tag_name_funcs.ensureUnusedCapacity(gpa, rendered.need_tag_name_funcs.count());
         for (rendered.need_tag_name_funcs.keys()) |enum_type| {
@@ -844,7 +860,7 @@ pub fn flush(c: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Prog
         }
     }
 
-    // UAVs may reference other UAVs or C types.
+    // UAVs may reference other UAVs, restricted types, or C types.
     {
         var index: usize = 0;
         while (need_uavs.count() > index) : (index += 1) {
@@ -858,6 +874,7 @@ pub fn flush(c: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Prog
                 &rendered.ctype_deps,
             );
             try mergeNeededUavs(zcu, &need_uavs, &rendered.need_uavs);
+            try mergeNeededRestricted(zcu, &need_restricted, &rendered.need_restricted);
         }
     }
 
@@ -962,7 +979,7 @@ pub fn flush(c: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Prog
     // * NAV exports
     // * UAV forward declarations
     // * NAV forward declarations
-    // * Lazy declarations (error names; @tagName functions; never_tail/never_inline wrappers)
+    // * Lazy declarations (restricted decls; error names; @tagName functions; never_tail/never_inline wrappers)
     // * UAV definitions
     // * NAV definitions
     //
@@ -1115,11 +1132,18 @@ pub fn flush(c: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Prog
             .error_msg = null,
             .ctype_deps = .empty,
             .uavs = .empty,
+            .need_restricted = .empty,
         };
         defer {
             assert(lazy_dg.uavs.count() == 0);
             lazy_dg.ctype_deps.deinit(gpa);
+            assert(lazy_dg.need_restricted.count() == 0);
         }
+        codegen.genRestricted(&lazy_dg, &need_restricted, &lazy_decls_aw.writer) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            error.OutOfMemory => |e| return e,
+            error.AnalysisFail => unreachable,
+        };
         const slice_const_u8_sentinel_0_cty: codegen.CType = try .lower(
             .slice_const_u8_sentinel_0,
             &lazy_dg.ctype_deps,
@@ -1259,10 +1283,12 @@ pub fn updateExports(
         .error_msg = null,
         .ctype_deps = .empty,
         .uavs = .empty,
+        .need_restricted = .empty,
     };
     defer {
         assert(dg.uavs.count() == 0);
         dg.ctype_deps.deinit(gpa);
+        assert(dg.need_restricted.count() == 0);
     }
 
     const code: String = code: {
@@ -1344,6 +1370,27 @@ fn mergeNeededUavs(
                 gop.value_ptr.* = need_align;
             }
         }
+    }
+}
+
+fn mergeNeededRestricted(
+    zcu: *const Zcu,
+    global: *std.array_hash_map.Auto(InternPool.Index, std.array_hash_map.Auto(InternPool.Index, void)),
+    new: *const std.array_hash_map.Auto(InternPool.Index, void),
+) Allocator.Error!void {
+    const gpa = zcu.comp.gpa;
+    const ip = &zcu.intern_pool;
+
+    try global.ensureUnusedCapacity(gpa, new.count());
+    for (new.keys()) |restricted_key| {
+        const restricted_ty = switch (ip.indexToKey(restricted_key)) {
+            else => unreachable,
+            .restricted_ptr_type => restricted_key,
+            .ptr => |ptr| ptr.ty,
+        };
+        const gop = global.getOrPutAssumeCapacity(restricted_ty);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        if (restricted_ty != restricted_key) try gop.value_ptr.put(gpa, restricted_key, {});
     }
 }
 

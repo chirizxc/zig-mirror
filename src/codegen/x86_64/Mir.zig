@@ -1867,7 +1867,7 @@ pub const Memory = struct {
         size: bits.Memory.Size,
         index: Register,
         scale: bits.Memory.Scale,
-        _: u13 = undefined,
+        unused: u13 = 0,
     };
 
     pub fn encode(mem: bits.Memory) Memory {
@@ -1895,7 +1895,7 @@ pub const Memory = struct {
                 .rip_inst => |inst_index| inst_index,
                 .nav => |nav| @intFromEnum(nav),
                 .uav => |uav| @intFromEnum(uav.val),
-                .lazy_sym => |lazy_sym| @intFromEnum(lazy_sym.ty),
+                .lazy_sym => |lazy_sym| @intFromEnum(lazy_sym.key),
                 .extern_func => |extern_func| @intFromEnum(extern_func),
             },
             .off = switch (mem.mod) {
@@ -1933,7 +1933,10 @@ pub const Memory = struct {
                         .rip_inst => .{ .rip_inst = mem.base },
                         .nav => .{ .nav = @enumFromInt(mem.base) },
                         .uav => .{ .uav = .{ .val = @enumFromInt(mem.base), .orig_ty = @enumFromInt(mem.extra) } },
-                        .lazy_sym => .{ .lazy_sym = .{ .kind = @enumFromInt(mem.extra), .ty = @enumFromInt(mem.base) } },
+                        .lazy_sym => .{ .lazy_sym = .{
+                            .kind = @enumFromInt(mem.extra),
+                            .key = @enumFromInt(mem.base),
+                        } },
                         .extern_func => .{ .extern_func = @enumFromInt(mem.base) },
                     },
                     .scale_index = switch (mem.info.index) {
@@ -2061,10 +2064,28 @@ pub fn emitLazy(
         .table_relocs = .empty,
     };
     defer e.deinit();
-    e.emitMir() catch |err| switch (err) {
-        error.LowerFail, error.EmitFail => return zcu.codegenFailTypeMsg(lazy_sym.ty, e.lower.err_msg.?),
-        error.InvalidInstruction, error.CannotEncode => return zcu.codegenFailType(lazy_sym.ty, "emit MIR failed: {s} (Zig compiler bug)", .{@errorName(err)}),
-        else => return zcu.codegenFailType(lazy_sym.ty, "emit MIR failed: {s}", .{@errorName(err)}),
+    e.emitMir() catch |err| switch (zcu.intern_pool.typeOf(lazy_sym.key)) {
+        .type_type => switch (err) {
+            error.LowerFail, error.EmitFail => return zcu.codegenFailTypeMsg(lazy_sym.key, e.lower.err_msg.?),
+            error.InvalidInstruction, error.CannotEncode => return zcu.codegenFailType(
+                lazy_sym.key,
+                "emit MIR failed: {t} (Zig compiler bug)",
+                .{err},
+            ),
+            else => return zcu.codegenFailType(lazy_sym.key, "emit MIR failed: {t}", .{err}),
+        },
+        else => switch (err) {
+            error.LowerFail, error.EmitFail => std.debug.panic("{f}: {s}", .{
+                @import("../../Value.zig").fromInterned(lazy_sym.key).fmtValue(pt), e.lower.err_msg.?.msg,
+            }),
+            error.InvalidInstruction, error.CannotEncode => std.debug.panic(
+                "{f}: emit MIR failed: {t} (Zig compiler bug)",
+                .{ @import("../../Value.zig").fromInterned(lazy_sym.key).fmtValue(pt), err },
+            ),
+            else => std.debug.panic("{f}: emit MIR failed: {t}", .{
+                @import("../../Value.zig").fromInterned(lazy_sym.key).fmtValue(pt), err,
+            }),
+        },
     };
 }
 

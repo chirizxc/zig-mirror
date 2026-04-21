@@ -3261,11 +3261,13 @@ fn airUnwrapRestricted(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Alloc
     const restricted_ty = self.typeOf(ty_op.operand);
     const operand = try self.resolveInst(ty_op.operand);
     switch (restricted_ty.restrictedRepr(zcu)) {
-        .double_pointer => {
-            _ = safety; // TODO
+        .indirect => {
+            if (safety) {
+                // TODO
+            }
             return self.wip.load(.normal, .ptr, operand, unrestricted_ty.abiAlignment(zcu).toLlvm(), "restricted.unwrap");
         },
-        .single_pointer => return operand,
+        .direct => return operand,
     }
 }
 

@@ -663,8 +663,8 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
 
             maybe_noop: {
                 switch (isel.air.typeOf(ty_op.operand, ip).restrictedRepr(zcu)) {
-                    .double_pointer => break :maybe_noop,
-                    .single_pointer => {},
+                    .indirect => break :maybe_noop,
+                    .direct => {},
                 }
                 if (true) break :maybe_noop;
                 if (ty_op.operand.toIndex()) |src_air_inst_index| {
@@ -5766,7 +5766,7 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                 const unrestricted_ty = ty_op.ty.toType();
                 const restricted_ty = isel.air.typeOf(ty_op.operand, ip);
                 switch (restricted_ty.restrictedRepr(zcu)) {
-                    .double_pointer => {
+                    .indirect => {
                         switch (air_tag) {
                             else => unreachable,
                             .unwrap_restricted => {},
@@ -5777,7 +5777,7 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                         _ = try dst_vi.value.load(isel, unrestricted_ty, ptr_mat.ra, .{});
                         try ptr_mat.finish(isel);
                     },
-                    .single_pointer => try dst_vi.value.move(isel, ty_op.operand),
+                    .direct => try dst_vi.value.move(isel, ty_op.operand),
                 }
             }
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
@@ -6888,12 +6888,12 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                     },
                 } }));
                 try isel.lazy_relocs.append(gpa, .{
-                    .symbol = .{ .kind = .const_data, .ty = .anyerror_type },
+                    .symbol = .{ .kind = .deferred_const_data, .key = .anyerror_type },
                     .reloc = .{ .label = @intCast(isel.instructions.items.len) },
                 });
                 try isel.emit(.add(ptr_ra.x(), ptr_ra.x(), .{ .immediate = 0 }));
                 try isel.lazy_relocs.append(gpa, .{
-                    .symbol = .{ .kind = .const_data, .ty = .anyerror_type },
+                    .symbol = .{ .kind = .deferred_const_data, .key = .anyerror_type },
                     .reloc = .{ .label = @intCast(isel.instructions.items.len) },
                 });
                 try isel.emit(.adrp(ptr_ra.x(), 0));
@@ -7231,12 +7231,12 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                 defer isel.freeReg(ptr_ra);
                 try isel.emit(.subs(.wzr, error_mat.ra.w(), .{ .register = ptr_ra.w() }));
                 try isel.lazy_relocs.append(gpa, .{
-                    .symbol = .{ .kind = .const_data, .ty = .anyerror_type },
+                    .symbol = .{ .kind = .deferred_const_data, .key = .anyerror_type },
                     .reloc = .{ .label = @intCast(isel.instructions.items.len) },
                 });
                 try isel.emit(.ldr(ptr_ra.w(), .{ .base = ptr_ra.x() }));
                 try isel.lazy_relocs.append(gpa, .{
-                    .symbol = .{ .kind = .const_data, .ty = .anyerror_type },
+                    .symbol = .{ .kind = .deferred_const_data, .key = .anyerror_type },
                     .reloc = .{ .label = @intCast(isel.instructions.items.len) },
                 });
                 try isel.emit(.adrp(ptr_ra.x(), 0));

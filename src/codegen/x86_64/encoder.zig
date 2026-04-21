@@ -238,7 +238,7 @@ pub const Instruction = struct {
                             try w.print("{f} ", .{sib.ptr_size});
 
                             if (mem.isSegmentRegister()) {
-                                return w.print("{s}:0x{x}", .{ @tagName(sib.base.reg), sib.disp });
+                                return w.print("{t}:0x{x}", .{ sib.base.reg, sib.disp });
                             }
 
                             try w.writeByte('[');
@@ -246,21 +246,18 @@ pub const Instruction = struct {
                             var any = true;
                             switch (sib.base) {
                                 .none => any = false,
-                                .reg => |reg| try w.print("{s}", .{@tagName(reg)}),
+                                .reg => |reg| try w.print("{t}", .{reg}),
                                 .frame => |frame_index| try w.print("{f}", .{frame_index}),
                                 .table => try w.print("Table", .{}),
                                 .rip_inst => |inst_index| try w.print("RipInst({d})", .{inst_index}),
-                                .nav => |nav| try w.print("Nav({d})", .{@intFromEnum(nav)}),
-                                .uav => |uav| try w.print("Uav({d})", .{@intFromEnum(uav.val)}),
-                                .lazy_sym => |lazy_sym| try w.print("LazySym({s}, {d})", .{
-                                    @tagName(lazy_sym.kind),
-                                    @intFromEnum(lazy_sym.ty),
-                                }),
-                                .extern_func => |extern_func| try w.print("ExternFunc({d})", .{@intFromEnum(extern_func)}),
+                                .nav => |nav| try w.print("Nav({d})", .{nav}),
+                                .uav => |uav| try w.print("Uav({d})", .{uav.val}),
+                                .lazy_sym => |lazy_sym| try w.print("LazySym({t}, {d})", .{ lazy_sym.kind, lazy_sym.key }),
+                                .extern_func => |extern_func| try w.print("ExternFunc({d})", .{extern_func}),
                             }
                             if (mem.scaleIndex()) |si| {
                                 if (any) try w.writeAll(" + ");
-                                try w.print("{s} * {d}", .{ @tagName(si.index), si.scale });
+                                try w.print("{t} * {d}", .{ si.index, si.scale });
                                 any = true;
                             }
                             if (sib.disp != 0 or !any) {
@@ -274,10 +271,7 @@ pub const Instruction = struct {
 
                             try w.writeByte(']');
                         },
-                        .moffs => |moffs| try w.print("{s}:0x{x}", .{
-                            @tagName(moffs.seg),
-                            moffs.offset,
-                        }),
+                        .moffs => |moffs| try w.print("{t}:0x{x}", .{ moffs.seg, moffs.offset }),
                     },
                     .imm => |imm| if (enc_op.isSigned()) {
                         const imms = imm.asSigned(enc_op.immBitSize());
@@ -344,9 +338,9 @@ pub const Instruction = struct {
     pub fn format(inst: Instruction, w: *Writer) Writer.Error!void {
         switch (inst.prefix) {
             .none, .directive => {},
-            else => try w.print("{s} ", .{@tagName(inst.prefix)}),
+            else => try w.print("{t} ", .{inst.prefix}),
         }
-        try w.print("{s}", .{@tagName(inst.encoding.mnemonic)});
+        try w.print("{t}", .{inst.encoding.mnemonic});
         for (inst.ops, inst.encoding.data.ops, 0..) |op, enc, i| {
             if (op == .none) break;
             if (i > 0) try w.writeByte(',');

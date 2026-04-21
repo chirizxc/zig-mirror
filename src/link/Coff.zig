@@ -138,6 +138,7 @@ pub const Node = union(enum) {
     uav: UavMapIndex,
     lazy_code: LazyMapRef.Index(.code),
     lazy_const_data: LazyMapRef.Index(.const_data),
+    lazy_deferred_const_data: LazyMapRef.Index(.deferred_const_data),
 
     pub const PseudoSectionMapIndex = enum(u32) {
         _,
@@ -222,7 +223,7 @@ pub const Node = union(enum) {
         }
 
         pub fn lazySymbol(lmr: LazyMapRef, coff: *const Coff) link.File.LazySymbol {
-            return .{ .kind = lmr.kind, .ty = coff.lazy.getPtrConst(lmr.kind).map.keys()[lmr.index] };
+            return .{ .kind = lmr.kind, .key = coff.lazy.getPtrConst(lmr.kind).map.keys()[lmr.index] };
         }
 
         pub fn symbol(lmr: LazyMapRef, coff: *const Coff) Symbol.Index {
@@ -1053,6 +1054,7 @@ fn computeNodeRva(coff: *Coff, ni: MappedFile.Node.Index) u32 {
             .uav,
             .lazy_code,
             .lazy_const_data,
+            .lazy_deferred_const_data,
             => |mi| mi.symbol(coff),
         };
         break :parent_rva parent_si.get(coff).rva;
@@ -1259,7 +1261,8 @@ fn navMapIndex(coff: *Coff, zcu: *Zcu, nav_index: InternPool.Nav.Index) !Node.Na
     if (!sym_gop.found_existing) sym_gop.value_ptr.* = coff.addSymbolAssumeCapacity();
     return @enumFromInt(sym_gop.index);
 }
-pub fn navSymbol(coff: *Coff, zcu: *Zcu, nav_index: InternPool.Nav.Index) !Symbol.Index {
+pub fn navSymbol(coff: *Coff, nav_index: InternPool.Nav.Index) !Symbol.Index {
+    const zcu = coff.base.comp.zcu.?;
     const ip = &zcu.intern_pool;
     const nav = ip.getNav(nav_index);
     if (nav.getExtern(ip)) |@"extern"| return coff.globalSymbol(
@@ -1282,24 +1285,38 @@ pub fn uavSymbol(coff: *Coff, uav_val: InternPool.Index) !Symbol.Index {
     return umi.symbol(coff);
 }
 
-pub fn lazySymbol(coff: *Coff, lazy: link.File.LazySymbol) !Symbol.Index {
-    const gpa = coff.base.comp.gpa;
-    try coff.symbol_table.ensureUnusedCapacity(gpa, 1);
-    const sym_gop = try coff.lazy.getPtr(lazy.kind).map.getOrPut(gpa, lazy.ty);
-    if (!sym_gop.found_existing) {
-        sym_gop.value_ptr.* = try coff.initSymbolAssumeCapacity();
-        coff.synth_prog_node.increaseEstimatedTotalItems(1);
-    }
-    return sym_gop.value_ptr.*;
+fn lazySymbolIfExists(coff: *Coff, lazy_sym: link.File.LazySymbol) ?Symbol.Index {
+    return coff.lazy.getPtr(lazy_sym.kind).map.get(lazy_sym.key);
+}
+fn lazySymbolAssumeCapacity(coff: *Coff, lazy_sym: link.File.LazySymbol) !struct { Symbol.Index, usize } {
+    const gop = try coff.lazy.getPtr(lazy_sym.kind).map.getOrPut(coff.base.comp.gpa, lazy_sym.key);
+    if (gop.found_existing) return .{ gop.value_ptr.*, gop.index };
+    const si = try coff.initSymbolAssumeCapacity();
+    gop.value_ptr.* = si;
+    coff.synth_prog_node.increaseEstimatedTotalItems(1);
+    return .{ si, gop.index };
+}
+pub fn lazySymbol(coff: *Coff, lazy_sym: link.File.LazySymbol) !Symbol.Index {
+    // optimize for future lookups, at the cost of an extra initial key lookup
+    if (coff.lazySymbolIfExists(lazy_sym)) |si| return si;
+    const comp = coff.base.comp;
+    const structure = codegen.getLazySymbolInfo(.structure, lazy_sym, comp.zcu.?);
+    try coff.symbol_table.ensureUnusedCapacity(
+        comp.gpa,
+        @as(usize, @intFromBool(structure.parent != null)) + 1,
+    );
+    if (structure.parent) |parent_lazy_sym| _ = try coff.lazySymbolAssumeCapacity(parent_lazy_sym);
+    if (structure.modify) |modification| _ = try coff.lazySymbolAssumeCapacity(modification.lazy_sym);
+    const si, _ = try coff.lazySymbolAssumeCapacity(lazy_sym);
+    return si;
 }
 
 pub fn getNavVAddr(
     coff: *Coff,
-    pt: Zcu.PerThread,
     nav: InternPool.Nav.Index,
     reloc_info: link.File.RelocInfo,
 ) !u64 {
-    return coff.getVAddr(reloc_info, try coff.navSymbol(pt.zcu, nav));
+    return coff.getVAddr(reloc_info, try coff.navSymbol(nav));
 }
 
 pub fn getUavVAddr(
@@ -1308,6 +1325,15 @@ pub fn getUavVAddr(
     reloc_info: link.File.RelocInfo,
 ) !u64 {
     return coff.getVAddr(reloc_info, try coff.uavSymbol(uav));
+}
+
+pub fn getLazySymbolVAddr(
+    coff: *Coff,
+    _: Zcu.PerThread,
+    lazy_sym: link.File.LazySymbol,
+    reloc_info: link.File.RelocInfo,
+) !u64 {
+    return coff.getVAddr(reloc_info, try coff.lazySymbol(lazy_sym));
 }
 
 pub fn getVAddr(coff: *Coff, reloc_info: link.File.RelocInfo, target_si: Symbol.Index) !u64 {
@@ -1713,7 +1739,7 @@ fn updateFuncInner(
 
 pub fn updateErrorData(coff: *Coff, pt: Zcu.PerThread) !void {
     coff.flushLazy(pt, .{
-        .kind = .const_data,
+        .kind = .deferred_const_data,
         .index = @intCast(coff.lazy.getPtr(.const_data).map.getIndex(.anyerror_type) orelse return),
     }) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
@@ -1798,13 +1824,13 @@ pub fn idle(coff: *Coff, tid: Zcu.PerThread.Id) !bool {
             lazy.value.pending_index += 1;
             const kind = switch (lmr.kind) {
                 .code => "code",
-                .const_data => "data",
+                .const_data, .deferred_const_data => "data",
             };
             var name: [std.Progress.Node.max_name_len]u8 = undefined;
             const sub_prog_node = coff.synth_prog_node.start(
                 std.fmt.bufPrint(&name, "lazy {s} for {f}", .{
                     kind,
-                    Type.fromInterned(lmr.lazySymbol(coff).ty).fmt(pt),
+                    Value.fromInterned(lmr.lazySymbol(coff).key).fmtValue(pt),
                 }) catch &name,
                 0,
             );
@@ -2092,24 +2118,36 @@ fn flushLazy(coff: *Coff, pt: Zcu.PerThread, lmr: Node.LazyMapRef) !void {
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
 
-    const lazy = lmr.lazySymbol(coff);
+    const lazy_sym = lmr.lazySymbol(coff);
     const si = lmr.symbol(coff);
+    const structure = codegen.getLazySymbolInfo(.structure, lazy_sym, zcu);
     const ni = ni: {
         const sym = si.get(coff);
         switch (sym.ni) {
             .none => {
                 try coff.nodes.ensureUnusedCapacity(gpa, 1);
-                const sec_si: Symbol.Index = switch (lazy.kind) {
+                const attrs = codegen.getLazySymbolInfo(.attributes, lazy_sym, zcu);
+                const parent_si: Symbol.Index = if (structure.parent) |parent_lazy_sym|
+                    coff.lazySymbolIfExists(parent_lazy_sym).?
+                else switch (lazy_sym.kind) {
                     .code => .text,
-                    .const_data => .rdata,
+                    .const_data, .deferred_const_data => .rdata,
                 };
-                const ni = try coff.mf.addLastChildNode(gpa, sec_si.node(coff), .{ .moved = true });
-                coff.nodes.appendAssumeCapacity(switch (lazy.kind) {
+                const addChildNode =
+                    if (attrs.header) &MappedFile.addOnlyChildNode else &MappedFile.addLastChildNode;
+                const ni = try addChildNode(&coff.mf, coff.base.comp.gpa, parent_si.node(coff), .{
+                    .size = attrs.size orelse 0,
+                    .alignment = attrs.required_alignment.toStdMem(),
+                    .fixed = attrs.header,
+                    .moved = true,
+                });
+                coff.nodes.appendAssumeCapacity(switch (lazy_sym.kind) {
                     .code => .{ .lazy_code = @enumFromInt(lmr.index) },
                     .const_data => .{ .lazy_const_data = @enumFromInt(lmr.index) },
+                    .deferred_const_data => .{ .lazy_deferred_const_data = @enumFromInt(lmr.index) },
                 });
                 sym.ni = ni;
-                sym.section_number = sec_si.get(coff).section_number;
+                sym.section_number = parent_si.get(coff).section_number;
             },
             else => si.deleteLocationRelocs(coff),
         }
@@ -2118,22 +2156,25 @@ fn flushLazy(coff: *Coff, pt: Zcu.PerThread, lmr: Node.LazyMapRef) !void {
         break :ni sym.ni;
     };
 
-    var required_alignment: InternPool.Alignment = .none;
     var nw: MappedFile.Node.Writer = undefined;
     ni.writer(&coff.mf, gpa, &nw);
     defer nw.deinit();
     try codegen.generateLazySymbol(
         &coff.base,
         pt,
-        Type.fromInterned(lazy.ty).srcLocOrNull(pt.zcu) orelse .unneeded,
-        lazy,
-        &required_alignment,
+        Type.fromInterned(lazy_sym.key).srcLocOrNull(pt.zcu) orelse .unneeded,
+        lazy_sym,
         &nw.interface,
         .none,
         .{ .atom_index = @intFromEnum(si) },
     );
     si.get(coff).size = @intCast(nw.interface.end);
     si.applyLocationRelocs(coff);
+
+    if (structure.modify) |modification| modification.operation.apply(
+        coff.lazySymbolIfExists(modification.lazy_sym).?.node(coff).slice(&coff.mf),
+        coff.targetEndian(),
+    );
 }
 
 fn flushMoved(coff: *Coff, ni: MappedFile.Node.Index) !void {
@@ -2219,6 +2260,7 @@ fn flushMoved(coff: *Coff, ni: MappedFile.Node.Index) !void {
         .uav,
         .lazy_code,
         .lazy_const_data,
+        .lazy_deferred_const_data,
         => |mi| mi.symbol(coff).flushMoved(coff),
     }
     try ni.childrenMoved(coff.base.comp.gpa, &coff.mf);
@@ -2269,7 +2311,7 @@ fn flushResized(coff: *Coff, ni: MappedFile.Node.Index) !void {
         inline .pseudo_section,
         .object_section,
         => |smi| smi.symbol(coff).get(coff).size = @intCast(size),
-        .global, .nav, .uav, .lazy_code, .lazy_const_data => {},
+        .global, .nav, .uav, .lazy_code, .lazy_const_data, .lazy_deferred_const_data => {},
     }
 }
 fn virtualSlide(coff: *Coff, start_section_index: usize, start_rva: u32) !void {
@@ -2322,7 +2364,7 @@ fn updateExportsInner(
     }
     try coff.symbol_table.ensureUnusedCapacity(gpa, export_indices.len);
     const exported_si: Symbol.Index = switch (exported) {
-        .nav => |nav| try coff.navSymbol(zcu, nav),
+        .nav => |nav| try coff.navSymbol(nav),
         .uav => |uav| @enumFromInt(switch (try coff.lowerUav(
             pt,
             uav,
@@ -2365,7 +2407,7 @@ pub fn deleteExport(coff: *Coff, exported: Zcu.Exported, name: InternPool.NullTe
     _ = name;
 }
 
-pub fn dump(coff: *Coff, tid: Zcu.PerThread.Id) Io.Cancelable!void {
+pub fn dump(coff: *Coff, tid: Zcu.PerThread.Id) !void {
     const comp = coff.base.comp;
     const io = comp.io;
     var buffer: [512]u8 = undefined;
@@ -2373,7 +2415,7 @@ pub fn dump(coff: *Coff, tid: Zcu.PerThread.Id) Io.Cancelable!void {
     defer io.unlockStderr();
     const w = &stderr.file_writer.interface;
     coff.printNode(tid, w, .root, 0) catch |err| switch (err) {
-        error.WriteFailed => return stderr.err.?,
+        error.WriteFailed => return stderr.file_writer.err.?,
     };
 }
 
@@ -2412,7 +2454,7 @@ pub fn printNode(
             const ip = &zcu.intern_pool;
             const nav = ip.getNav(nmi.navIndex(coff));
             try w.print("({f}, {f})", .{
-                Type.fromInterned(nav.typeOf(ip)).fmt(.{ .zcu = zcu, .tid = tid }),
+                Type.fromInterned(nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
                 nav.fqn.fmt(ip),
             });
         },
@@ -2425,10 +2467,9 @@ pub fn printNode(
             });
         },
         inline .lazy_code, .lazy_const_data => |lmi| try w.print("({f})", .{
-            Type.fromInterned(lmi.lazySymbol(coff).ty).fmt(.{
-                .zcu = coff.base.comp.zcu.?,
-                .tid = tid,
-            }),
+            Value.fromInterned(lmi.lazySymbol(coff).key).fmtValue(
+                .{ .zcu = coff.base.comp.zcu.?, .tid = tid },
+            ),
         }),
     }
     {
@@ -2458,7 +2499,7 @@ pub fn printNode(
         const line_len = 0x10;
         var line_it = std.mem.window(
             u8,
-            coff.mf.contents[@intCast(file_loc.offset)..][0..@intCast(file_loc.size)],
+            coff.mf.memory_map.memory[@intCast(file_loc.offset)..][0..@intCast(file_loc.size)],
             line_len,
             line_len,
         );

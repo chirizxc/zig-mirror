@@ -3995,6 +3995,7 @@ pub const Feature = enum {
     /// * With this feature disabled, semantic analysis, code generation, and linking all occur on the
     ///   same thread, and the "emit" stage has access to AIR.
     separate_thread,
+    restricted_types,
 };
 
 pub fn backendSupportsFeature(zcu: *const Zcu, comptime feature: Feature) bool {

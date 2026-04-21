@@ -1019,7 +1019,7 @@ pub const File = struct {
     /// May be called before or after updateFunc/updateNav therefore it is up to the linker to allocate
     /// the block/atom.
     /// Never called when LLVM is codegenning the ZCU.
-    pub fn getNavVAddr(base: *File, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index, reloc_info: RelocInfo) !u64 {
+    pub fn getNavVAddr(base: *File, nav_index: InternPool.Nav.Index, reloc_info: RelocInfo) !u64 {
         assert(base.comp.zcu.?.llvm_object == null);
         switch (base.tag) {
             .lld => unreachable,
@@ -1029,7 +1029,7 @@ pub const File = struct {
             .plan9 => unreachable,
             inline else => |tag| {
                 dev.check(tag.devFeature());
-                return @as(*tag.Type(), @fieldParentPtr("base", base)).getNavVAddr(pt, nav_index, reloc_info);
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).getNavVAddr(nav_index, reloc_info);
             },
         }
     }
@@ -1290,11 +1290,25 @@ pub const File = struct {
     };
 
     pub const LazySymbol = struct {
-        pub const Kind = enum { code, const_data };
+        pub const Kind = enum(u2) { code, const_data, deferred_const_data };
 
         kind: Kind,
-        ty: InternPool.Index,
+        key: InternPool.Index,
     };
+    pub fn getLazySymbolVAddr(base: *File, pt: Zcu.PerThread, lazy_symbol: LazySymbol, reloc_info: RelocInfo) !u64 {
+        assert(base.comp.zcu.?.llvm_object == null);
+        switch (base.tag) {
+            .lld => unreachable,
+            .c => unreachable,
+            .spirv => unreachable,
+            .wasm => unreachable,
+            .plan9 => unreachable,
+            inline else => |tag| {
+                dev.check(tag.devFeature());
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).getLazySymbolVAddr(pt, lazy_symbol, reloc_info);
+            },
+        }
+    }
 
     pub fn determinePermissions(
         output_mode: std.builtin.OutputMode,

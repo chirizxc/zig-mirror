@@ -948,5 +948,9 @@ pub inline fn backendSupportsFeature(backend: std.builtin.CompilerBackend, compt
             // being run in a separate thread from now on.
             else => true,
         },
+        .restricted_types => switch (backend) {
+            .stage2_c, .stage2_x86_64 => true,
+            else => false,
+        },
     };
 }

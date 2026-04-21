@@ -61,6 +61,8 @@ pub const Mir = struct {
     /// less than the natural alignment.
     need_uavs: std.AutoArrayHashMapUnmanaged(InternPool.Index, Alignment),
     ctype_deps: CType.Dependencies,
+    /// Key is a restricted type or value for which we need generated supporting decls.
+    need_restricted: std.array_hash_map.Auto(InternPool.Index, void),
     /// Key is an enum type for which we need a generated `@tagName` function.
     need_tag_name_funcs: std.AutoArrayHashMapUnmanaged(InternPool.Index, void),
     /// Key is a function Nav for which we need a generated `zig_never_tail` wrapper.
@@ -74,6 +76,7 @@ pub const Mir = struct {
         gpa.free(mir.code);
         mir.need_uavs.deinit(gpa);
         mir.ctype_deps.deinit(gpa);
+        mir.need_restricted.deinit(gpa);
         mir.need_tag_name_funcs.deinit(gpa);
         mir.need_never_tail_funcs.deinit(gpa);
         mir.need_never_inline_funcs.deinit(gpa);
@@ -549,6 +552,25 @@ pub const Function = struct {
         try f.writeCValue(w, member, .other);
     }
 
+    fn writePanic(f: *Function, panic_id: Zcu.SimplePanicId, w: *std.Io.Writer) !void {
+        const zcu = f.dg.pt.zcu;
+        const ip = &zcu.intern_pool;
+        try renderNavName(w, switch (ip.indexToKey(zcu.builtin_decl_values.get(panic_id.toBuiltin()))) {
+            inline .@"extern", .func => |func| func.owner_nav,
+            .ptr => |ptr| switch (ptr.byte_offset) {
+                0 => switch (ptr.base_addr) {
+                    .nav => |nav| nav,
+                    else => unreachable,
+                },
+                else => unreachable,
+            },
+            else => unreachable,
+        }, ip);
+        try w.writeAll("();");
+        try f.newline();
+        try airUnreach(f);
+    }
+
     fn fail(f: *Function, comptime format: []const u8, args: anytype) Error {
         return f.dg.fail(format, args);
     }
@@ -645,6 +667,7 @@ pub const DeclGen = struct {
     /// `.none` for natural alignment. The specified alignment is never
     /// less than the natural alignment.
     uavs: std.AutoArrayHashMapUnmanaged(InternPool.Index, Alignment),
+    need_restricted: std.array_hash_map.Auto(InternPool.Index, void),
 
     fn fail(dg: *DeclGen, comptime format: []const u8, args: anytype) Error {
         @branchHint(.cold);
@@ -1055,11 +1078,24 @@ pub const DeclGen = struct {
                 try dg.renderValue(w, .fromInterned(slice.len), initializer_type);
                 try w.writeByte('}');
             },
-            .ptr => {
-                const derivation = try val.pointerDerivation(dg.arena, pt, null);
-                try w.writeByte('(');
-                try dg.renderPointer(w, derivation, location);
-                try w.writeByte(')');
+            .ptr => switch (ty.restrictedRepr(zcu)) {
+                .indirect => {
+                    try dg.need_restricted.ensureUnusedCapacity(zcu.gpa, 2);
+                    dg.need_restricted.putAssumeCapacity(ty.toIntern(), {});
+                    dg.need_restricted.putAssumeCapacity(val.toIntern(), {});
+
+                    const restricted_ty_name = ty.containerTypeName(ip).toSlice(ip);
+                    try w.print("&zig_restricted_{f}__{d}[zig_restricted_index_{f}__{d}]", .{
+                        fmtIdentUnsolo(restricted_ty_name), ty.toIntern(),
+                        fmtIdentUnsolo(restricted_ty_name), val.toIntern(),
+                    });
+                },
+                .direct => {
+                    const derivation = try val.pointerDerivation(dg.arena, pt, null);
+                    try w.writeByte('(');
+                    try dg.renderPointer(w, derivation, location);
+                    try w.writeByte(')');
+                },
             },
             .opt => |opt| switch (CType.classifyOptional(ty, zcu)) {
                 .npv_payload => unreachable, // opv optional
@@ -2061,6 +2097,55 @@ pub fn genGlobalAsm(zcu: *Zcu, w: *Writer) !void {
     }
 }
 
+pub fn genRestricted(
+    dg: *DeclGen,
+    need_restricted: *const std.array_hash_map.Auto(InternPool.Index, std.array_hash_map.Auto(InternPool.Index, void)),
+    w: *Writer,
+) Error!void {
+    const pt = dg.pt;
+    const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
+    for (need_restricted.keys(), need_restricted.values()) |restricted_ty, *restricted_vals| {
+        const unrestricted_ptr_type = ip.indexToKey(restricted_ty).restricted_ptr_type.unrestricted_ptr_type;
+        const unrestricted_cty: CType = try .lower(.fromInterned(unrestricted_ptr_type), &dg.ctype_deps, dg.arena, zcu);
+        const restricted_ty_name = Type.fromInterned(restricted_ty).containerTypeName(ip).toSlice(ip);
+        try w.print(
+            \\#define zig_restricted_len_{f}__{d} {d}u
+            \\static {f}const zig_restricted_{f}__{d}[zig_restricted_len_{f}__{d}]{f} = {{
+            \\
+        , .{
+            fmtIdentUnsolo(restricted_ty_name),
+            restricted_ty,
+            restricted_vals.count(),
+
+            unrestricted_cty.fmtDeclaratorPrefix(zcu),
+            fmtIdentUnsolo(restricted_ty_name),
+            restricted_ty,
+            fmtIdentUnsolo(restricted_ty_name),
+            restricted_ty,
+            unrestricted_cty.fmtDeclaratorSuffix(zcu),
+        });
+        for (restricted_vals.keys(), 0..) |restricted_val, restricted_index| {
+            try w.print(
+                \\#define zig_restricted_index_{f}__{d} {d}u
+                \\ [zig_restricted_index_{f}__{d}] = 
+            , .{
+                fmtIdentUnsolo(restricted_ty_name),
+                restricted_val,
+                restricted_index,
+
+                fmtIdentUnsolo(restricted_ty_name),
+                restricted_val,
+            });
+            try dg.renderValue(w, .fromInterned(
+                try ip.getCoerced(zcu.gpa, zcu.comp.io, pt.tid, restricted_val, unrestricted_ptr_type),
+            ), .static_initializer);
+            try w.writeAll(",\n");
+        }
+        try w.writeAll("};\n");
+    }
+}
+
 pub fn genErrDecls(
     zcu: *const Zcu,
     w: *Writer,
@@ -2220,6 +2305,7 @@ pub fn generate(
             .expected_block = null,
             .ctype_deps = .empty,
             .uavs = .empty,
+            .need_restricted = .empty,
         },
         .code = .init(gpa),
         .indent_counter = 0,
@@ -2231,6 +2317,7 @@ pub fn generate(
         function.code.deinit();
         function.dg.ctype_deps.deinit(gpa);
         function.dg.uavs.deinit(gpa);
+        function.dg.need_restricted.deinit(gpa);
         function.deinit();
     }
 
@@ -2252,6 +2339,7 @@ pub fn generate(
         .code = &.{},
         .ctype_deps = function.dg.ctype_deps.move(),
         .need_uavs = function.dg.uavs.move(),
+        .need_restricted = function.dg.need_restricted.move(),
         .need_tag_name_funcs = function.need_tag_name_funcs.move(),
         .need_never_tail_funcs = function.need_never_tail_funcs.move(),
         .need_never_inline_funcs = function.need_never_inline_funcs.move(),
@@ -5541,8 +5629,8 @@ fn airWrapErrUnionErr(f: *Function, inst: Air.Inst.Index) !CValue {
 }
 
 fn airUnwrapRestricted(f: *Function, inst: Air.Inst.Index, safety: bool) !CValue {
-    const pt = f.dg.pt;
-    const zcu = pt.zcu;
+    const zcu = f.dg.pt.zcu;
+    const ip = &zcu.intern_pool;
     const ty_op = f.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
 
     const unrestricted_ty = ty_op.ty.toType();
@@ -5553,14 +5641,57 @@ fn airUnwrapRestricted(f: *Function, inst: Air.Inst.Index, safety: bool) !CValue
     const w = &f.code.writer;
     const local = try f.allocLocal(inst, unrestricted_ty);
 
-    try f.writeCValue(w, local, .other);
-    try w.writeAll(" = ");
     switch (restricted_ty.restrictedRepr(zcu)) {
-        .double_pointer => {
-            _ = safety; // TODO
+        .indirect => {
+            if (safety) {
+                const target = &f.dg.mod.resolved_target.result;
+                const ptr_bits = target.ptrBitWidth();
+
+                const int_from_ptr = try f.allocLocal(inst, .usize);
+                try f.writeCValue(w, int_from_ptr, .other);
+                try w.print(" = zig_subw_u{d}(({f})", .{
+                    ptr_bits,
+                    CType.fmtTypeName(.{ .int = .uintptr_t }, zcu),
+                });
+                try f.writeCValue(w, operand, .other);
+                try w.print(", ({f})zig_restricted_{f}__{d}, {f});", .{
+                    CType.fmtTypeName(.{ .int = .uintptr_t }, zcu),
+                    fmtIdentUnsolo(restricted_ty.containerTypeName(ip).toSlice(ip)),
+                    restricted_ty.toIntern(),
+                    fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits, false, 10, .lower),
+                });
+                try f.newline();
+
+                const rotate_amount = std.math.log2_int(u16, @divExact(ptr_bits, 8));
+                try w.print("if ((zig_shr_u{d}(", .{ptr_bits});
+                try f.writeCValue(w, int_from_ptr, .other);
+                try w.print(", {f}) | zig_shlw_u{d}(", .{
+                    fmtUnsignedIntLiteralSmall(target, .uint8_t, rotate_amount, false, 10, .lower),
+                    ptr_bits,
+                });
+                try f.writeCValue(w, int_from_ptr, .other);
+                try w.print(", {f}, {f})) >= zig_restricted_len_{f}__{d}) {{", .{
+                    fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits - rotate_amount, false, 10, .lower),
+                    fmtUnsignedIntLiteralSmall(target, .uint8_t, ptr_bits, false, 10, .lower),
+                    fmtIdentUnsolo(restricted_ty.containerTypeName(ip).toSlice(ip)),
+                    restricted_ty.toIntern(),
+                });
+                f.indent();
+                try f.newline();
+                try f.writePanic(.corrupt_restricted_pointer, w);
+                try f.outdent();
+                try w.writeByte('}');
+                try f.newline();
+            }
+            try f.writeCValue(w, local, .other);
+            try w.writeAll(" = ");
             try f.writeCValueDeref(w, operand);
         },
-        .single_pointer => try f.writeCValue(w, operand, .other),
+        .direct => {
+            try f.writeCValue(w, local, .other);
+            try w.writeAll(" = ");
+            try f.writeCValue(w, operand, .other);
+        },
     }
     try w.writeByte(';');
     try f.newline();
@@ -5849,7 +5980,8 @@ fn airBinBuiltinCall(
     try f.writeCValue(w, rhs, .other);
     if (f.typeOf(bin_op.rhs).isVector(zcu)) try v.elem(f, w);
     try f.dg.renderBuiltinInfo(w, scalar_ty, info);
-    try w.writeAll(");\n");
+    try w.writeAll(");");
+    try f.newline();
     try v.end(f, inst, w);
 
     return local;
@@ -6459,7 +6591,8 @@ fn airShuffleOne(f: *Function, inst: Air.Inst.Index) !CValue {
             },
             .value => |val| try f.dg.renderValue(w, .fromInterned(val), .other),
         }
-        try w.writeAll(";\n");
+        try w.writeByte(';');
+        try f.newline();
     }
 
     return local;

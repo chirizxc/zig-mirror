@@ -1282,9 +1282,9 @@ fn genLazy(func: *Func, lazy_sym: link.File.LazySymbol) InnerError!void {
     const pt = func.pt;
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    switch (Type.fromInterned(lazy_sym.ty).zigTypeTag(zcu)) {
-        .@"enum" => {
-            const enum_ty = Type.fromInterned(lazy_sym.ty);
+    switch (ip.indexToKey(lazy_sym.key)) {
+        .enum_type => {
+            const enum_ty = Type.fromInterned(lazy_sym.key);
             wip_mir_log.debug("{f}.@tagName:", .{enum_ty.fmt(pt)});
 
             const param_regs = abi.Registers.Integer.function_arg_regs;
@@ -1301,9 +1301,9 @@ fn genLazy(func: *Func, lazy_sym: link.File.LazySymbol) InnerError!void {
             const zo = elf_file.zigObjectPtr().?;
             const sym_index = zo.getOrCreateMetadataForLazySymbol(elf_file, pt, .{
                 .kind = .const_data,
-                .ty = enum_ty.toIntern(),
+                .key = lazy_sym.key,
             }) catch |err|
-                return func.fail("{s} creating lazy symbol", .{@errorName(err)});
+                return func.fail("{t} creating lazy symbol", .{err});
 
             try func.genSetReg(Type.u64, data_reg, .{ .lea_symbol = .{ .sym = sym_index } });
 
@@ -1367,8 +1367,8 @@ fn genLazy(func: *Func, lazy_sym: link.File.LazySymbol) InnerError!void {
             });
         },
         else => return func.fail(
-            "TODO implement {s} for {f}",
-            .{ @tagName(lazy_sym.kind), Type.fromInterned(lazy_sym.ty).fmt(pt) },
+            "TODO implement {t} for {f}",
+            .{ lazy_sym.kind, Value.fromInterned(lazy_sym.key).fmtValue(pt) },
         ),
     }
 }
@@ -8359,22 +8359,28 @@ fn wantSafety(func: *Func) bool {
 
 fn fail(func: *const Func, comptime format: []const u8, args: anytype) error{ OutOfMemory, CodegenFail } {
     @branchHint(.cold);
-    const zcu = func.pt.zcu;
-    switch (func.owner) {
-        .nav_index => |i| return zcu.codegenFail(i, format, args),
-        .lazy_sym => |s| return zcu.codegenFailType(s.ty, format, args),
-    }
-    return error.CodegenFail;
+    const pt = func.pt;
+    const zcu = pt.zcu;
+    return switch (func.owner) {
+        .nav_index => |i| zcu.codegenFail(i, format, args),
+        .lazy_sym => |s| switch (zcu.intern_pool.typeOf(s.key)) {
+            .type_type => zcu.codegenFailType(s.key, format, args),
+            else => std.debug.panic("{f}: " ++ format, .{Value.fromInterned(s.key).fmtValue(pt)} ++ args),
+        },
+    };
 }
 
 fn failMsg(func: *const Func, msg: *ErrorMsg) error{ OutOfMemory, CodegenFail } {
     @branchHint(.cold);
-    const zcu = func.pt.zcu;
-    switch (func.owner) {
-        .nav_index => |i| return zcu.codegenFailMsg(i, msg),
-        .lazy_sym => |s| return zcu.codegenFailTypeMsg(s.ty, msg),
-    }
-    return error.CodegenFail;
+    const pt = func.pt;
+    const zcu = pt.zcu;
+    return switch (func.owner) {
+        .nav_index => |i| zcu.codegenFailMsg(i, msg),
+        .lazy_sym => |s| switch (zcu.intern_pool.typeOf(s.key)) {
+            .type_type => zcu.codegenFailTypeMsg(s.key, msg),
+            else => std.debug.panic("{f}: {s}", .{ Value.fromInterned(s.key).fmtValue(pt), msg.msg }),
+        },
+    };
 }
 
 fn parseRegName(name: []const u8) ?Register {

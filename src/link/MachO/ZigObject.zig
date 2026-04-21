@@ -18,10 +18,11 @@ atoms_extra: std.ArrayList(u32) = .empty,
 
 /// Table of tracked LazySymbols.
 lazy_syms: LazySymbolTable = .{},
+/// Table of tracked LazySymbols that are deferred until flush.
+deferred_lazy_syms: LazySymbolTable = .{},
 
 /// Table of tracked Navs.
 navs: NavTable = .{},
-
 /// Table of tracked Uavs.
 uavs: UavTable = .{},
 
@@ -78,12 +79,13 @@ pub fn deinit(self: *ZigObject, allocator: Allocator) void {
     self.atoms_indexes.deinit(allocator);
     self.atoms_extra.deinit(allocator);
 
+    self.lazy_syms.deinit(allocator);
+    self.deferred_lazy_syms.deinit(allocator);
+
     for (self.navs.values()) |*meta| {
         meta.exports.deinit(allocator);
     }
     self.navs.deinit(allocator);
-
-    self.lazy_syms.deinit(allocator);
 
     for (self.uavs.values()) |*meta| {
         meta.exports.deinit(allocator);
@@ -559,30 +561,23 @@ pub fn flush(self: *ZigObject, macho_file: *MachO, tid: Zcu.PerThread.Id) link.F
     const diags = &macho_file.base.comp.link_diags;
 
     // Handle any lazy symbols that were emitted by incremental compilation.
-    if (self.lazy_syms.getPtr(.anyerror_type)) |metadata| {
+    {
         const pt: Zcu.PerThread = .activate(macho_file.base.comp.zcu.?, tid);
         defer pt.deactivate();
 
-        // Most lazy symbols can be updated on first use, but
-        // anyerror needs to wait for everything to be flushed.
-        if (metadata.text_state != .unused) self.updateLazySymbol(
-            macho_file,
-            pt,
-            .{ .kind = .code, .ty = .anyerror_type },
-            metadata.text_symbol_index,
-        ) catch |err| switch (err) {
-            error.OutOfMemory, error.LinkFailure => |e| return e,
-            else => |e| return diags.fail("failed to update lazy symbol: {s}", .{@errorName(e)}),
-        };
-        if (metadata.const_state != .unused) self.updateLazySymbol(
-            macho_file,
-            pt,
-            .{ .kind = .const_data, .ty = .anyerror_type },
-            metadata.const_symbol_index,
-        ) catch |err| switch (err) {
-            error.OutOfMemory, error.LinkFailure => |e| return e,
-            else => |e| return diags.fail("failed to update lazy symbol: {s}", .{@errorName(e)}),
-        };
+        for (self.deferred_lazy_syms.values(), self.deferred_lazy_syms.keys()) |*metadata, key| {
+            assert(metadata.text_state == .unused);
+            if (metadata.const_state != .unused) self.updateLazySymbol(
+                macho_file,
+                pt,
+                .{ .kind = .deferred_const_data, .key = key },
+                metadata.const_symbol_index,
+            ) catch |err| switch (err) {
+                error.LinkFailure, error.CodegenFail => return error.LinkFailure,
+                error.OutOfMemory => |e| return e,
+                else => |e| return diags.fail("failed to update lazy symbol: {s}", .{@errorName(e)}),
+            };
+        }
     }
     for (self.lazy_syms.values()) |*metadata| {
         if (metadata.text_state != .unused) metadata.text_state = .flushed;
@@ -614,11 +609,10 @@ pub fn flush(self: *ZigObject, macho_file: *MachO, tid: Zcu.PerThread.Id) link.F
 pub fn getNavVAddr(
     self: *ZigObject,
     macho_file: *MachO,
-    pt: Zcu.PerThread,
     nav_index: InternPool.Nav.Index,
     reloc_info: link.File.RelocInfo,
 ) !u64 {
-    const zcu = pt.zcu;
+    const zcu = macho_file.base.comp.zcu.?;
     const ip = &zcu.intern_pool;
     const nav = ip.getNav(nav_index);
     log.debug("getNavVAddr {f}({d})", .{ nav.fqn.fmt(ip), nav_index });
@@ -666,6 +660,51 @@ pub fn getUavVAddr(
     reloc_info: link.File.RelocInfo,
 ) !u64 {
     const sym_index = self.uavs.get(uav).?.symbol_index;
+    const sym = self.symbols.items[sym_index];
+    const vaddr = sym.getAddress(.{}, macho_file);
+    switch (reloc_info.parent) {
+        .none => unreachable,
+        .atom_index => |atom_index| {
+            const parent_atom = self.symbols.items[atom_index].getAtom(macho_file).?;
+            try parent_atom.addReloc(macho_file, .{
+                .tag = .@"extern",
+                .offset = @intCast(reloc_info.offset),
+                .target = sym_index,
+                .addend = reloc_info.addend,
+                .type = .unsigned,
+                .meta = .{
+                    .pcrel = false,
+                    .has_subtractor = false,
+                    .length = 3,
+                    .symbolnum = @intCast(sym.nlist_idx),
+                },
+            });
+        },
+        .debug_output => |debug_output| switch (debug_output) {
+            .dwarf => |wip_nav| try wip_nav.infoExternalReloc(.{
+                .source_off = @intCast(reloc_info.offset),
+                .target_sym = sym_index,
+                .target_off = reloc_info.addend,
+            }),
+            .none => unreachable,
+        },
+    }
+    return vaddr;
+}
+
+pub fn getLazySymbolVAddr(
+    self: *ZigObject,
+    macho_file: *MachO,
+    pt: Zcu.PerThread,
+    lazy_sym: link.File.LazySymbol,
+    reloc_info: link.File.RelocInfo,
+) !u64 {
+    log.debug("getLazySymbolVAddr {t} {f}({d})", .{
+        lazy_sym.kind,
+        Value.fromInterned(lazy_sym.key).fmtValue(pt),
+        lazy_sym.key,
+    });
+    const sym_index = try self.getOrCreateMetadataForLazySymbol(macho_file, pt, lazy_sym);
     const sym = self.symbols.items[sym_index];
     const vaddr = sym.getAddress(.{}, macho_file);
     switch (reloc_info.parent) {
@@ -1355,35 +1394,34 @@ fn updateLazySymbol(
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
 
-    var required_alignment: Atom.Alignment = .none;
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
 
     const name_str = blk: {
-        const name = try std.fmt.allocPrint(gpa, "__lazy_{s}_{f}", .{
-            @tagName(lazy_sym.kind),
-            Type.fromInterned(lazy_sym.ty).fmt(pt),
+        const name = try std.fmt.allocPrint(gpa, "__lazy_{t}_{f}", .{
+            lazy_sym.kind, Value.fromInterned(lazy_sym.key).fmtValue(pt),
         });
         defer gpa.free(name);
         break :blk try self.addString(gpa, name);
     };
 
-    const src = Type.fromInterned(lazy_sym.ty).srcLocOrNull(zcu) orelse Zcu.LazySrcLoc.unneeded;
-    try codegen.generateLazySymbol(
+    codegen.generateLazySymbol(
         &macho_file.base,
         pt,
-        src,
+        Type.fromInterned(lazy_sym.key).srcLocOrNull(zcu) orelse Zcu.LazySrcLoc.unneeded,
         lazy_sym,
-        &required_alignment,
         &aw.writer,
         .none,
         .{ .atom_index = symbol_index },
-    );
+    ) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+        else => |e| return e,
+    };
     const code = aw.written();
 
     const output_section_index = switch (lazy_sym.kind) {
         .code => macho_file.zig_text_sect_index.?,
-        .const_data => macho_file.zig_const_sect_index.?,
+        .const_data, .deferred_const_data => macho_file.zig_const_sect_index.?,
     };
     const sym = &self.symbols.items[symbol_index];
     sym.name = name_str;
@@ -1398,7 +1436,7 @@ fn updateLazySymbol(
     const atom = sym.getAtom(macho_file).?;
     atom.setAlive(true);
     atom.name = name_str;
-    atom.alignment = required_alignment;
+    atom.alignment = codegen.getLazySymbolInfo(.attributes, lazy_sym, zcu).required_alignment;
     atom.size = code.len;
     atom.out_n_sect = output_section_index;
 
@@ -1516,12 +1554,16 @@ pub fn getOrCreateMetadataForLazySymbol(
     pt: Zcu.PerThread,
     lazy_sym: link.File.LazySymbol,
 ) !Symbol.Index {
-    const gop = try self.lazy_syms.getOrPut(pt.zcu.gpa, lazy_sym.ty);
-    errdefer _ = if (!gop.found_existing) self.lazy_syms.pop();
+    const lazy_syms = switch (lazy_sym.kind) {
+        .code, .const_data => &self.lazy_syms,
+        .deferred_const_data => &self.deferred_lazy_syms,
+    };
+    const gop = try lazy_syms.getOrPut(pt.zcu.gpa, lazy_sym.key);
+    errdefer _ = if (!gop.found_existing) lazy_syms.pop();
     if (!gop.found_existing) gop.value_ptr.* = .{};
     const symbol_index_ptr, const state_ptr = switch (lazy_sym.kind) {
         .code => .{ &gop.value_ptr.text_symbol_index, &gop.value_ptr.text_state },
-        .const_data => .{ &gop.value_ptr.const_symbol_index, &gop.value_ptr.const_state },
+        .const_data, .deferred_const_data => .{ &gop.value_ptr.const_symbol_index, &gop.value_ptr.const_state },
     };
     switch (state_ptr.*) {
         .unused => symbol_index_ptr.* = try self.newSymbolWithAtom(pt.zcu.gpa, .{}, macho_file),
@@ -1530,8 +1572,10 @@ pub fn getOrCreateMetadataForLazySymbol(
     }
     state_ptr.* = .pending_flush;
     const symbol_index = symbol_index_ptr.*;
-    // anyerror needs to be deferred until flush
-    if (lazy_sym.ty != .anyerror_type) try self.updateLazySymbol(macho_file, pt, lazy_sym, symbol_index);
+    switch (lazy_sym.kind) {
+        .code, .const_data => try self.updateLazySymbol(macho_file, pt, lazy_sym, symbol_index),
+        .deferred_const_data => {},
+    }
     return symbol_index;
 }
 

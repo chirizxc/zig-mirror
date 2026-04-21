@@ -12358,7 +12358,11 @@ pub fn addFieldTagValue(
 /// encoding instead of `Tag.ptr_uav_aligned` when possible.
 fn ptrsHaveSameAlignment(ip: *InternPool, a_ty: Index, a_info: Key.PtrType, b_ty: Index) bool {
     if (a_ty == b_ty) return true;
-    const b_info = ip.indexToKey(b_ty).ptr_type;
+    const b_info = switch (ip.indexToKey(b_ty)) {
+        else => unreachable,
+        .ptr_type => |ptr_type| ptr_type,
+        .restricted_ptr_type => |restricted_ptr_type| ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type,
+    };
     return a_info.flags.alignment == b_info.flags.alignment and
         (a_info.child == b_info.child or a_info.flags.alignment != .none);
 }

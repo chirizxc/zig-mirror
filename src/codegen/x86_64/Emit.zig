@@ -163,8 +163,8 @@ pub fn emitMir(emit: *Emit) Error!void {
                         else if (emit.bin_file.cast(.macho)) |macho_file|
                             macho_file.getZigObject().?.getOrCreateMetadataForLazySymbol(macho_file, emit.pt, lazy_sym) catch |err|
                                 return emit.fail("{s} creating lazy symbol", .{@errorName(err)})
-                        else if (emit.bin_file.cast(.coff2)) |elf|
-                            @intFromEnum(try elf.lazySymbol(lazy_sym))
+                        else if (emit.bin_file.cast(.coff2)) |coff|
+                            @intFromEnum(try coff.lazySymbol(lazy_sym))
                         else
                             return emit.fail("lazy symbols unimplemented for {s}", .{@tagName(emit.bin_file.tag)}),
                         .is_extern = false,

@@ -285,7 +285,7 @@ pub const CType = union(enum) {
                 .pointer => {
                     const ptr = cur_ty.ptrInfo(zcu);
                     if (cur_ty.unrestrictedType(zcu)) |unrestricted_ty| switch (cur_ty.restrictedRepr(zcu)) {
-                        .double_pointer => {
+                        .indirect => {
                             const unrestricted_cty = try lowerInner(unrestricted_ty, true, deps, arena, zcu);
                             const unrestricted_cty_buf = try arena.create(CType);
                             unrestricted_cty_buf.* = unrestricted_cty;
@@ -296,7 +296,7 @@ pub const CType = union(enum) {
                                 .nonstring = false,
                             } };
                         },
-                        .single_pointer => {},
+                        .direct => {},
                     };
                     switch (ptr.flags.size) {
                         .slice => {
