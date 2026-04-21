@@ -558,6 +558,8 @@ pub const Object = struct {
         val: InternPool.Index,
         @"addrspace": std.builtin.AddressSpace,
     }, Builder.Variable.Index),
+    /// Maps restricted types to supporting decls.
+    restricted_map: std.array_hash_map.Auto(InternPool.Index, RestrictedDecls),
     /// Maps enum types to their corresponding LLVM functions for implementing the `tag_name` instruction.
     enum_tag_name_map: std.AutoHashMapUnmanaged(InternPool.Index, Builder.Function.Index),
     /// Serves the same purpose as `enum_tag_name_map` but for the `is_named_enum_value` instruction.
@@ -666,6 +668,7 @@ pub const Object = struct {
             .zcu = zcu,
             .nav_map = .empty,
             .uav_map = .empty,
+            .restricted_map = .empty,
             .enum_tag_name_map = .empty,
             .named_enum_map = .empty,
             .type_map = .empty,
@@ -686,11 +689,72 @@ pub const Object = struct {
         self.debug_types.deinit(gpa);
         self.nav_map.deinit(gpa);
         self.uav_map.deinit(gpa);
+        for (self.restricted_map.values()) |*value| value.deinit(gpa);
+        self.restricted_map.deinit(gpa);
         self.enum_tag_name_map.deinit(gpa);
         self.named_enum_map.deinit(gpa);
         self.type_map.deinit(gpa);
         self.builder.deinit();
         self.* = undefined;
+    }
+
+    const RestrictedDecls = struct {
+        len: Builder.Variable.Index,
+        array: Builder.Variable.Index,
+        values: std.array_hash_map.Auto(InternPool.Index, Builder.Constant),
+
+        fn deinit(rd: *RestrictedDecls, gpa: Allocator) void {
+            rd.values.deinit(gpa);
+            rd.* = undefined;
+        }
+    };
+    pub fn getRestrictedDecls(o: *Object, ty: Type) Allocator.Error!*RestrictedDecls {
+        const gop = try o.restricted_map.getOrPut(o.gpa, ty.toIntern());
+        if (gop.found_existing) return gop.value_ptr;
+        errdefer _ = o.restricted_map.pop().?;
+
+        const target = o.zcu.getTarget();
+        const ip = &o.zcu.intern_pool;
+        const ptr_align = Type.ptrAbiAlignment(target).toLlvm();
+
+        const ty_name = ty.containerTypeName(ip).toSlice(ip);
+        gop.value_ptr.* = .{
+            .len = try o.builder.addVariable(
+                try o.builder.strtabStringFmt("{s}.len", .{ty_name}),
+                try o.lowerType(.usize),
+                .default,
+            ),
+            .array = try o.builder.addVariable(
+                try o.builder.strtabString(ty_name),
+                .void,
+                .default,
+            ),
+            .values = .empty,
+        };
+        gop.value_ptr.len.setLinkage(.private, &o.builder);
+        gop.value_ptr.len.setMutability(.constant, &o.builder);
+        gop.value_ptr.len.setAlignment(ptr_align, &o.builder);
+        gop.value_ptr.len.setUnnamedAddr(.unnamed_addr, &o.builder);
+        gop.value_ptr.array.setLinkage(.private, &o.builder);
+        gop.value_ptr.array.setMutability(.constant, &o.builder);
+        gop.value_ptr.array.setAlignment(ptr_align, &o.builder);
+        // Setting unnamed_addr here would reduce safety, and the module emitting the safety checks may not be the same module
+        // that defined the restricted type. In any case, llvm will add unnamed_addr itself if no safety checks end up being emitted.
+        gop.value_ptr.array.setUnnamedAddr(.default, &o.builder);
+        return gop.value_ptr;
+    }
+    fn genRestrictedDecls(o: *Object) Allocator.Error!void {
+        for (o.restricted_map.values()) |restricted_decls| {
+            const len = restricted_decls.values.count();
+            try restricted_decls.len.setInitializer(
+                try o.builder.intConst(restricted_decls.len.typeOf(&o.builder), len),
+                &o.builder,
+            );
+            try restricted_decls.array.setInitializer(try o.builder.arrayConst(
+                try o.builder.arrayType(len, .ptr),
+                restricted_decls.values.values(),
+            ), &o.builder);
+        }
     }
 
     fn genErrorNameTable(o: *Object) Allocator.Error!void {
@@ -771,6 +835,7 @@ pub const Object = struct {
         const diags = &comp.link_diags;
 
         {
+            try o.genRestrictedDecls();
             if (o.errors_len_variable != .none) {
                 const errors_len = zcu.intern_pool.global_error_set.getNamesFromMainThread().len;
                 const init_val = try o.builder.intConst(try o.errorIntType(), errors_len);
@@ -2006,55 +2071,64 @@ pub const Object = struct {
             .pointer => {
                 const ptr_size = Type.ptrAbiSize(zcu.getTarget());
                 const ptr_align = Type.ptrAbiAlignment(zcu.getTarget());
-
-                if (ty.isSlice(zcu)) {
-                    const debug_ptr_type = try o.builder.debugMemberType(
-                        try o.builder.metadataString("ptr"),
-                        null, // file
-                        ty_fwd_ref,
-                        0, // line
-                        try o.getDebugType(pt, ty.slicePtrFieldType(zcu)),
-                        ptr_size * 8,
-                        ptr_align.toByteUnits().? * 8,
-                        0, // offset
-                    );
-
-                    const debug_len_type = try o.builder.debugMemberType(
-                        try o.builder.metadataString("len"),
-                        null, // file
-                        ty_fwd_ref,
-                        0, // line
-                        try o.getDebugType(pt, .usize),
-                        ptr_size * 8,
-                        ptr_align.toByteUnits().? * 8,
-                        ptr_size * 8,
-                    );
-
-                    return o.builder.debugStructType(
+                switch (ty.restrictedRepr(zcu)) {
+                    .indirect => return o.builder.debugPointerType(
                         name,
                         null, // file
                         o.debug_compile_unit.unwrap().?, // scope
                         0, // line
-                        null, // underlying type
-                        ptr_size * 2 * 8,
+                        try o.getDebugType(pt, ty.unrestrictedType(zcu).?),
+                        ptr_size * 8,
                         ptr_align.toByteUnits().? * 8,
-                        try o.builder.metadataTuple(&.{
-                            debug_ptr_type,
-                            debug_len_type,
-                        }),
-                    );
-                }
+                        0, // offset
+                    ),
+                    .direct => if (ty.isSlice(zcu)) {
+                        const debug_ptr_type = try o.builder.debugMemberType(
+                            try o.builder.metadataString("ptr"),
+                            null, // file
+                            ty_fwd_ref,
+                            0, // line
+                            try o.getDebugType(pt, ty.slicePtrFieldType(zcu)),
+                            ptr_size * 8,
+                            ptr_align.toByteUnits().? * 8,
+                            0, // offset
+                        );
 
-                return o.builder.debugPointerType(
-                    name,
-                    null, // file
-                    o.debug_compile_unit.unwrap().?, // scope
-                    0, // line
-                    try o.getDebugType(pt, ty.childType(zcu)),
-                    ptr_size * 8,
-                    ptr_align.toByteUnits().? * 8,
-                    0, // offset
-                );
+                        const debug_len_type = try o.builder.debugMemberType(
+                            try o.builder.metadataString("len"),
+                            null, // file
+                            ty_fwd_ref,
+                            0, // line
+                            try o.getDebugType(pt, .usize),
+                            ptr_size * 8,
+                            ptr_align.toByteUnits().? * 8,
+                            ptr_size * 8,
+                        );
+
+                        return o.builder.debugStructType(
+                            name,
+                            null, // file
+                            o.debug_compile_unit.unwrap().?, // scope
+                            0, // line
+                            null, // underlying type
+                            ptr_size * 2 * 8,
+                            ptr_align.toByteUnits().? * 8,
+                            try o.builder.metadataTuple(&.{
+                                debug_ptr_type,
+                                debug_len_type,
+                            }),
+                        );
+                    } else return o.builder.debugPointerType(
+                        name,
+                        null, // file
+                        o.debug_compile_unit.unwrap().?, // scope
+                        0, // line
+                        try o.getDebugType(pt, ty.childType(zcu)),
+                        ptr_size * 8,
+                        ptr_align.toByteUnits().? * 8,
+                        0, // offset
+                    ),
+                }
             },
             .array => return o.builder.debugArrayType(
                 name,
@@ -3047,7 +3121,7 @@ pub const Object = struct {
             .empty_tuple,
             .none,
             => unreachable,
-            else => switch (ip.indexToKey(t.toIntern())) {
+            else => t: switch (ip.indexToKey(t.toIntern())) {
                 .int_type => |int_type| try o.builder.intType(int_type.bits),
                 .ptr_type => |ptr_type| type: {
                     const ptr_ty = try o.builder.ptrType(
@@ -3061,7 +3135,10 @@ pub const Object = struct {
                         }),
                     };
                 },
-                .restricted_ptr_type => @panic("TODO implement restricted pointers"),
+                .restricted_ptr_type => |restricted_ptr_type| switch (t.restrictedRepr(zcu)) {
+                    .indirect => .ptr,
+                    .direct => continue :t .{ .ptr_type = ip.indexToKey(restricted_ptr_type.unrestricted_ptr_type).ptr_type },
+                },
                 .array_type => |array_type| o.builder.arrayType(
                     array_type.lenIncludingSentinel(),
                     try o.lowerType(.fromInterned(array_type.child)),
@@ -3545,7 +3622,27 @@ pub const Object = struct {
                 128 => try o.builder.fp128Const(val.toFloat(f128, zcu)),
                 else => unreachable,
             },
-            .ptr => try o.lowerPtr(arg_val, 0),
+            .ptr => switch (ty.restrictedRepr(zcu)) {
+                .indirect => {
+                    const restricted_decls = try o.getRestrictedDecls(ty);
+                    const gop = try restricted_decls.values.getOrPut(o.gpa, arg_val);
+                    if (!gop.found_existing) gop.value_ptr.* = try o.lowerValue(try ip.getCoerced(
+                        zcu.gpa,
+                        zcu.comp.io,
+                        .main, // FIXME
+                        arg_val,
+                        ty.unrestrictedType(zcu).?.toIntern(),
+                    ));
+                    return o.builder.gepConst(
+                        .inbounds,
+                        .ptr,
+                        restricted_decls.array.toConst(&o.builder),
+                        null,
+                        &.{try o.builder.intConst(.i64, gop.index)},
+                    );
+                },
+                .direct => try o.lowerPtr(arg_val, 0),
+            },
             .slice => |slice| return o.builder.structConst(try o.lowerType(ty), &.{
                 try o.lowerValue(slice.ptr),
                 try o.lowerValue(slice.len),

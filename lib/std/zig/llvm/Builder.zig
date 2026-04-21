@@ -2415,6 +2415,10 @@ pub const Global = struct {
             self.ptr(builder).unnamed_addr = unnamed_addr;
         }
 
+        pub fn setType(self: Index, ty: Type, builder: *Builder) void {
+            self.ptr(builder).type = ty;
+        }
+
         pub fn setDebugMetadata(self: Index, dbg: Metadata, builder: *Builder) void {
             self.ptr(builder).dbg = dbg.toOptional();
         }
@@ -2659,6 +2663,18 @@ pub const Variable = struct {
 
         pub fn getAlignment(self: Index, builder: *Builder) Alignment {
             return self.ptr(builder).alignment;
+        }
+
+        pub fn setLinkage(self: Index, linkage: Linkage, builder: *Builder) void {
+            self.ptrConst(builder).global.setLinkage(linkage, builder);
+        }
+
+        pub fn setType(self: Index, ty: Type, builder: *Builder) void {
+            self.ptrConst(builder).global.setType(ty, builder);
+        }
+
+        pub fn setUnnamedAddr(self: Index, unnamed_addr: UnnamedAddr, builder: *Builder) void {
+            return self.ptrConst(builder).global.setUnnamedAddr(unnamed_addr, builder);
         }
 
         pub fn setGlobalVariableExpression(self: Index, expression: Metadata, builder: *Builder) void {

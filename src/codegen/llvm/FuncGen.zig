@@ -3253,19 +3253,50 @@ fn airWrapErrUnionErr(self: *FuncGen, body_tail: []const Air.Inst.Index) Allocat
     return result_ptr;
 }
 
-fn airUnwrapRestricted(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!Builder.Value {
-    const o = self.object;
+fn airUnwrapRestricted(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!Builder.Value {
+    const o = fg.object;
     const zcu = o.zcu;
-    const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
-    const unrestricted_ty = ty_op.ty.toType();
-    const restricted_ty = self.typeOf(ty_op.operand);
-    const operand = try self.resolveInst(ty_op.operand);
+    const target = zcu.getTarget();
+    const ty_op = fg.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
+    const restricted_ty = fg.typeOf(ty_op.operand);
+    const operand = try fg.resolveInst(ty_op.operand);
     switch (restricted_ty.restrictedRepr(zcu)) {
         .indirect => {
+            const unrestricted_ty = ty_op.ty.toType();
             if (safety) {
-                // TODO
+                const restricted_decls = try o.getRestrictedDecls(restricted_ty);
+                const llvm_usize_ty = restricted_decls.len.typeOf(&o.builder);
+                const array = try o.builder.castConst(.ptrtoint, restricted_decls.array.toConst(&o.builder), llvm_usize_ty);
+                const ptr_diff = try fg.wip.bin(
+                    .sub,
+                    try fg.wip.cast(.ptrtoint, operand, llvm_usize_ty, "unwrap_restricted.operand_int"),
+                    array.toValue(),
+                    "unwrap_restricted.ptr_diff",
+                );
+                const index = try fg.wip.callIntrinsic(.normal, .none, .fshr, &.{llvm_usize_ty}, &.{
+                    ptr_diff,
+                    ptr_diff,
+                    try o.builder.intValue(llvm_usize_ty, std.math.log2_int(u64, Type.ptrAbiSize(target))),
+                }, "unwrap_restricted.index");
+                const len = try fg.wip.load(
+                    .normal,
+                    llvm_usize_ty,
+                    restricted_decls.len.toValue(&o.builder),
+                    Type.ptrAbiAlignment(target).toLlvm(),
+                    "unwrap_restricted.len",
+                );
+                const ok = try fg.wip.icmp(.ult, index, len, "unwrap_restricted.ok");
+
+                const invalid_block = try fg.wip.block(1, "unwrap_restricted.invalid");
+                const valid_block = try fg.wip.block(1, "unwrap_restricted.valid");
+                _ = try fg.wip.brCond(ok, valid_block, invalid_block, .none);
+
+                fg.wip.cursor = .{ .block = invalid_block };
+                try fg.buildSimplePanic(.corrupt_restricted_pointer);
+
+                fg.wip.cursor = .{ .block = valid_block };
             }
-            return self.wip.load(.normal, .ptr, operand, unrestricted_ty.abiAlignment(zcu).toLlvm(), "restricted.unwrap");
+            return fg.wip.load(.normal, .ptr, operand, unrestricted_ty.abiAlignment(zcu).toLlvm(), "unwrap_restricted");
         },
         .direct => return operand,
     }

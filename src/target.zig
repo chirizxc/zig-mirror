@@ -949,7 +949,7 @@ pub inline fn backendSupportsFeature(backend: std.builtin.CompilerBackend, compt
             else => true,
         },
         .restricted_types => switch (backend) {
-            .stage2_c, .stage2_x86_64 => true,
+            .stage2_c, .stage2_llvm, .stage2_x86_64 => true,
             else => false,
         },
     };
