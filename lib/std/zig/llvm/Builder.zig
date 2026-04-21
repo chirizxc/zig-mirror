@@ -1284,7 +1284,7 @@ pub const Attribute = union(Kind) {
                     try w.print(" {t}(\"", .{attribute});
                     var any = false;
                     inline for (@typeInfo(AllocKind).@"struct".fields) |field| {
-                        if (comptime std.mem.eql(u8, field.name, "_")) continue;
+                        if (comptime std.mem.eql(u8, field.name, "unused")) continue;
                         if (@field(allockind, field.name)) {
                             if (!any) {
                                 try w.writeByte(',');
@@ -1469,7 +1469,7 @@ pub const Attribute = union(Kind) {
         positive_subnormal: bool = false,
         positive_normal: bool = false,
         positive_infinity: bool = false,
-        _: u22 = 0,
+        unused: enum(u22) { unused = 0 } = .unused,
 
         pub const all = FpClass{
             .signaling_nan = true,
@@ -1512,7 +1512,7 @@ pub const Attribute = union(Kind) {
         uninitialized: bool,
         zeroed: bool,
         aligned: bool,
-        _: u26 = 0,
+        unused: enum(u26) { unused = 0 } = .unused,
     };
 
     pub const AllocSize = packed struct(u32) {
@@ -1533,7 +1533,7 @@ pub const Attribute = union(Kind) {
         argmem: Effect = .none,
         inaccessiblemem: Effect = .none,
         other: Effect = .none,
-        _: u26 = 0,
+        unused: enum(u26) { unused = 0 } = .unused,
 
         pub const Effect = enum(u2) { none, read, write, readwrite };
 
@@ -1553,7 +1553,7 @@ pub const Attribute = union(Kind) {
     pub const VScaleRange = packed struct(u32) {
         min: Alignment,
         max: Alignment,
-        _: u20 = 0,
+        unused: enum(u20) { unused = 0 } = .unused,
 
         fn toLlvm(self: VScaleRange) packed struct(u64) { max: u32, min: u32 } {
             return .{
@@ -1870,7 +1870,7 @@ pub const ThreadLocal = enum(u3) {
 
         pub fn format(p: Prefixed, w: *Writer) Writer.Error!void {
             switch (p.thread_local) {
-                .default => return,
+                .default => {},
                 .generaldynamic => {
                     var vecs: [2][]const u8 = .{ p.prefix, "thread_local" };
                     return w.writeVecAll(&vecs);
@@ -4221,7 +4221,6 @@ pub const Function = struct {
             call,
             @"call fast",
             cmpxchg,
-            @"cmpxchg weak",
             extractelement,
             extractvalue,
             fadd,
@@ -4619,9 +4618,7 @@ pub const Function = struct {
                     .@"tail call",
                     .@"tail call fast",
                     => wip.extraData(Call, instruction.data).ty.functionReturn(wip.builder),
-                    .cmpxchg,
-                    .@"cmpxchg weak",
-                    => wip.builder.structTypeAssumeCapacity(.normal, &.{
+                    .cmpxchg => wip.builder.structTypeAssumeCapacity(.normal, &.{
                         wip.extraData(CmpXchg, instruction.data).cmp.typeOfWip(wip),
                         .i1,
                     }),
@@ -4806,9 +4803,7 @@ pub const Function = struct {
                     .@"tail call",
                     .@"tail call fast",
                     => function.extraData(Call, instruction.data).ty.functionReturn(builder),
-                    .cmpxchg,
-                    .@"cmpxchg weak",
-                    => builder.structTypeAssumeCapacity(.normal, &.{
+                    .cmpxchg => builder.structTypeAssumeCapacity(.normal, &.{
                         function.extraData(CmpXchg, instruction.data)
                             .cmp.typeOf(function_index, builder),
                         .i1,
@@ -5027,33 +5022,86 @@ pub const Function = struct {
             pub const Info = packed struct(u32) {
                 alignment: Alignment,
                 addr_space: AddrSpace,
-                _: u2 = undefined,
+                unused: enum(u2) { unused = 0 } = .unused,
             };
         };
 
         pub const Load = struct {
-            info: MemoryAccessInfo,
+            info: Info,
             type: Type,
             ptr: Value,
+            //range: if (info.has_range) Metadata else void,
+
+            pub const Info = packed struct(u32) {
+                access_kind: MemoryAccessKind,
+                sync_scope: SyncScope,
+                ordering: AtomicOrdering,
+                alignment: Alignment,
+                has_range: bool,
+                unused: enum(u20) { unused = 0 } = .unused,
+            };
         };
 
         pub const Store = struct {
-            info: MemoryAccessInfo,
+            info: Info,
             val: Value,
             ptr: Value,
+
+            pub const Info = packed struct(u32) {
+                access_kind: MemoryAccessKind,
+                sync_scope: SyncScope,
+                ordering: AtomicOrdering,
+                alignment: Alignment,
+                unused: enum(u21) { unused = 0 } = .unused,
+            };
         };
 
         pub const CmpXchg = struct {
-            info: MemoryAccessInfo,
+            info: Info,
             ptr: Value,
             cmp: Value,
             new: Value,
 
-            pub const Kind = enum { strong, weak };
+            pub const Kind = enum(u1) {
+                strong,
+                weak,
+
+                pub fn format(kind: Kind, w: *Writer) Writer.Error!void {
+                    return Prefixed.format(.{ .kind = kind, .prefix = "" }, w);
+                }
+
+                pub const Prefixed = struct {
+                    kind: Kind,
+                    prefix: []const u8,
+
+                    pub fn format(p: Prefixed, w: *Writer) Writer.Error!void {
+                        switch (p.kind) {
+                            .strong => {},
+                            .weak => {
+                                var vecs: [2][]const u8 = .{ p.prefix, "weak" };
+                                try w.writeVecAll(&vecs);
+                            },
+                        }
+                    }
+                };
+
+                pub fn fmt(kind: Kind, prefix: []const u8) Prefixed {
+                    return .{ .kind = kind, .prefix = prefix };
+                }
+            };
+            pub const Info = packed struct(u32) {
+                kind: Kind,
+                access_kind: MemoryAccessKind,
+                sync_scope: SyncScope,
+                success_ordering: AtomicOrdering,
+                failure_ordering: AtomicOrdering,
+                alignment: Alignment,
+                unused: enum(u17) { unused = 0 } = .unused,
+            };
         };
 
         pub const AtomicRmw = struct {
-            info: MemoryAccessInfo,
+            info: Info,
             ptr: Value,
             val: Value,
 
@@ -5073,8 +5121,21 @@ pub const Function = struct {
                 fsub = 12,
                 fmax = 13,
                 fmin = 14,
-                none = maxInt(u5),
             };
+            pub const Info = packed struct(u32) {
+                access_kind: MemoryAccessKind,
+                operation: Operation,
+                sync_scope: SyncScope,
+                ordering: AtomicOrdering,
+                alignment: Alignment,
+                unused: enum(u16) { unused = 0 } = .unused,
+            };
+        };
+
+        pub const Fence = packed struct(u32) {
+            sync_scope: SyncScope,
+            success_ordering: AtomicOrdering,
+            unused: enum(u28) { unused = 0 } = .unused,
         };
 
         pub const GetElementPtr = struct {
@@ -5112,6 +5173,7 @@ pub const Function = struct {
             callee: Value,
             args_len: u32,
             //args: [args_len]Value,
+            //callees: if (info.has_callees) Metadata else void,
 
             pub const Kind = enum {
                 normal,
@@ -5125,8 +5187,9 @@ pub const Function = struct {
             };
             pub const Info = packed struct(u32) {
                 call_conv: CallConv,
+                has_callees: bool,
                 has_op_bundle_cold: bool,
-                _: u21 = undefined,
+                unused: enum(u20) { unused = 0 } = .unused,
             };
         };
 
@@ -5195,8 +5258,11 @@ pub const Function = struct {
                 Value,
                 Instruction.BrCond.Weights,
                 => @enumFromInt(value),
-                MemoryAccessInfo,
                 Instruction.Alloca.Info,
+                Instruction.Load.Info,
+                Instruction.Store.Info,
+                Instruction.CmpXchg.Info,
+                Instruction.AtomicRmw.Info,
                 Instruction.Call.Info,
                 => @bitCast(value),
                 else => @compileError("bad field type: " ++ field.name ++ ": " ++ @typeName(field.type)),
@@ -5706,6 +5772,10 @@ pub const WipFunction = struct {
         return instruction.toValue();
     }
 
+    pub const LoadMetadata = struct {
+        range: Metadata.Optional = .none,
+    };
+
     pub fn load(
         self: *WipFunction,
         access_kind: MemoryAccessKind,
@@ -5714,7 +5784,19 @@ pub const WipFunction = struct {
         alignment: Alignment,
         name: []const u8,
     ) Allocator.Error!Value {
-        return self.loadAtomic(access_kind, ty, ptr, .system, .none, alignment, name);
+        return self.loadMetadata(access_kind, ty, ptr, alignment, .{}, name);
+    }
+
+    pub fn loadMetadata(
+        self: *WipFunction,
+        access_kind: MemoryAccessKind,
+        ty: Type,
+        ptr: Value,
+        alignment: Alignment,
+        metadata: LoadMetadata,
+        name: []const u8,
+    ) Allocator.Error!Value {
+        return self.loadAtomicMetadata(access_kind, ty, ptr, .system, .none, alignment, metadata, name);
     }
 
     pub fn loadAtomic(
@@ -5725,6 +5807,20 @@ pub const WipFunction = struct {
         sync_scope: SyncScope,
         ordering: AtomicOrdering,
         alignment: Alignment,
+        name: []const u8,
+    ) Allocator.Error!Value {
+        return self.loadAtomicMetadata(access_kind, ty, ptr, sync_scope, ordering, alignment, .{}, name);
+    }
+
+    pub fn loadAtomicMetadata(
+        self: *WipFunction,
+        access_kind: MemoryAccessKind,
+        ty: Type,
+        ptr: Value,
+        sync_scope: SyncScope,
+        ordering: AtomicOrdering,
+        alignment: Alignment,
+        metadata: LoadMetadata,
         name: []const u8,
     ) Allocator.Error!Value {
         assert(ptr.typeOfWip(self).isPointer(self.builder));
@@ -5741,13 +5837,15 @@ pub const WipFunction = struct {
                         .none => .system,
                         else => sync_scope,
                     },
-                    .success_ordering = ordering,
+                    .ordering = ordering,
                     .alignment = alignment,
+                    .has_range = !metadata.range.is_none,
                 },
                 .type = ty,
                 .ptr = ptr,
             }),
         });
+        if (metadata.range.unwrap()) |range| self.extra.appendAssumeCapacity(@bitCast(range));
         return instruction.toValue();
     }
 
@@ -5784,7 +5882,7 @@ pub const WipFunction = struct {
                         .none => .system,
                         else => sync_scope,
                     },
-                    .success_ordering = ordering,
+                    .ordering = ordering,
                     .alignment = alignment,
                 },
                 .val = val,
@@ -5803,7 +5901,7 @@ pub const WipFunction = struct {
         try self.ensureUnusedExtraCapacity(1, NoExtra, 0);
         const instruction = try self.addInst(null, .{
             .tag = .fence,
-            .data = @bitCast(MemoryAccessInfo{
+            .data = @bitCast(Instruction.Fence{
                 .sync_scope = sync_scope,
                 .success_ordering = ordering,
             }),
@@ -5833,12 +5931,10 @@ pub const WipFunction = struct {
         _ = try self.builder.structType(.normal, &.{ ty, .i1 });
         try self.ensureUnusedExtraCapacity(1, Instruction.CmpXchg, 0);
         const instruction = try self.addInst(name, .{
-            .tag = switch (kind) {
-                .strong => .cmpxchg,
-                .weak => .@"cmpxchg weak",
-            },
+            .tag = .cmpxchg,
             .data = self.addExtraAssumeCapacity(Instruction.CmpXchg{
                 .info = .{
+                    .kind = kind,
                     .access_kind = access_kind,
                     .sync_scope = sync_scope,
                     .success_ordering = success_ordering,
@@ -5873,9 +5969,9 @@ pub const WipFunction = struct {
             .data = self.addExtraAssumeCapacity(Instruction.AtomicRmw{
                 .info = .{
                     .access_kind = access_kind,
-                    .atomic_rmw_operation = operation,
+                    .operation = operation,
                     .sync_scope = sync_scope,
-                    .success_ordering = ordering,
+                    .ordering = ordering,
                     .alignment = alignment,
                 },
                 .ptr = ptr,
@@ -6079,6 +6175,11 @@ pub const WipFunction = struct {
         }, cond, lhs, rhs, name);
     }
 
+    pub const CallMetadata = struct {
+        callees: Metadata.Optional = .none,
+        has_op_bundle_cold: bool = false,
+    };
+
     pub fn call(
         self: *WipFunction,
         kind: Instruction.Call.Kind,
@@ -6089,10 +6190,10 @@ pub const WipFunction = struct {
         args: []const Value,
         name: []const u8,
     ) Allocator.Error!Value {
-        return self.callInner(kind, call_conv, function_attributes, ty, callee, args, name, false);
+        return self.callMetadata(kind, call_conv, function_attributes, ty, callee, args, .{}, name);
     }
 
-    fn callInner(
+    pub fn callMetadata(
         self: *WipFunction,
         kind: Instruction.Call.Kind,
         call_conv: CallConv,
@@ -6100,8 +6201,8 @@ pub const WipFunction = struct {
         ty: Type,
         callee: Value,
         args: []const Value,
+        metadata: CallMetadata,
         name: []const u8,
-        has_op_bundle_cold: bool,
     ) Allocator.Error!Value {
         const ret_ty = ty.functionReturn(self.builder);
         assert(ty.isFunction(self.builder));
@@ -6109,7 +6210,8 @@ pub const WipFunction = struct {
         const params = ty.functionParameters(self.builder);
         for (params, args[0..params.len]) |param, arg_val| assert(param == arg_val.typeOfWip(self));
 
-        try self.ensureUnusedExtraCapacity(1, Instruction.Call, args.len);
+        try self.ensureUnusedExtraCapacity(1, Instruction.Call, args.len +
+            @intFromBool(!metadata.callees.is_none));
         const instruction = try self.addInst(switch (ret_ty) {
             .void => null,
             else => name,
@@ -6127,7 +6229,8 @@ pub const WipFunction = struct {
             .data = self.addExtraAssumeCapacity(Instruction.Call{
                 .info = .{
                     .call_conv = call_conv,
-                    .has_op_bundle_cold = has_op_bundle_cold,
+                    .has_callees = !metadata.callees.is_none,
+                    .has_op_bundle_cold = metadata.has_op_bundle_cold,
                 },
                 .attributes = function_attributes,
                 .ty = ty,
@@ -6136,6 +6239,7 @@ pub const WipFunction = struct {
             }),
         });
         self.extra.appendSliceAssumeCapacity(@ptrCast(args));
+        if (metadata.callees.unwrap()) |callees| self.extra.appendAssumeCapacity(@bitCast(callees));
         return instruction.toValue();
     }
 
@@ -6176,15 +6280,15 @@ pub const WipFunction = struct {
 
     pub fn callIntrinsicAssumeCold(self: *WipFunction) Allocator.Error!Value {
         const intrinsic = try self.builder.getIntrinsic(.assume, &.{});
-        return self.callInner(
+        return self.callMetadata(
             .normal,
             CallConv.default,
             .none,
             intrinsic.typeOf(self.builder),
             intrinsic.toValue(self.builder),
             &.{try self.builder.intValue(.i1, 1)},
-            "",
-            true,
+            .{ .has_op_bundle_cold = true },
+            undefined,
         );
     }
 
@@ -6355,8 +6459,11 @@ pub const WipFunction = struct {
                         Value,
                         Instruction.BrCond.Weights,
                         => @intFromEnum(value),
-                        MemoryAccessInfo,
                         Instruction.Alloca.Info,
+                        Instruction.Load.Info,
+                        Instruction.Store.Info,
+                        Instruction.CmpXchg.Info,
+                        Instruction.AtomicRmw.Info,
                         Instruction.Call.Info,
                         => @bitCast(value),
                         else => @compileError("bad field type: " ++ field.name ++ ": " ++ @typeName(field.type)),
@@ -6648,6 +6755,7 @@ pub const WipFunction = struct {
                     => {
                         var extra = self.extraDataTrail(Instruction.Call, instruction.data);
                         const args = extra.trail.next(extra.data.args_len, Value, self);
+                        const callees = extra.trail.next(@intFromBool(extra.data.info.has_callees), Metadata, self);
                         instruction.data = wip_extra.addExtra(Instruction.Call{
                             .info = extra.data.info,
                             .attributes = extra.data.attributes,
@@ -6656,10 +6764,9 @@ pub const WipFunction = struct {
                             .args_len = extra.data.args_len,
                         });
                         wip_extra.appendMappedValues(args, instructions);
+                        wip_extra.appendSlice(callees);
                     },
-                    .cmpxchg,
-                    .@"cmpxchg weak",
-                    => {
+                    .cmpxchg => {
                         const extra = self.extraData(Instruction.CmpXchg, instruction.data);
                         instruction.data = wip_extra.addExtra(Instruction.CmpXchg{
                             .info = extra.info,
@@ -6730,12 +6837,14 @@ pub const WipFunction = struct {
                     .load,
                     .@"load atomic",
                     => {
-                        const extra = self.extraData(Instruction.Load, instruction.data);
+                        var extra = self.extraDataTrail(Instruction.Load, instruction.data);
+                        const range = extra.trail.next(@intFromBool(extra.data.info.has_range), Metadata, self);
                         instruction.data = wip_extra.addExtra(Instruction.Load{
-                            .type = extra.type,
-                            .ptr = instructions.map(extra.ptr),
-                            .info = extra.info,
+                            .type = extra.data.type,
+                            .ptr = instructions.map(extra.data.ptr),
+                            .info = extra.data.info,
                         });
+                        wip_extra.appendSlice(range);
                     },
                     .phi,
                     .@"phi fast",
@@ -7011,8 +7120,11 @@ pub const WipFunction = struct {
                 Value,
                 Instruction.BrCond.Weights,
                 => @intFromEnum(value),
-                MemoryAccessInfo,
                 Instruction.Alloca.Info,
+                Instruction.Load.Info,
+                Instruction.Store.Info,
+                Instruction.CmpXchg.Info,
+                Instruction.AtomicRmw.Info,
                 Instruction.Call.Info,
                 => @bitCast(value),
                 else => @compileError("bad field type: " ++ field.name ++ ": " ++ @typeName(field.type)),
@@ -7060,8 +7172,11 @@ pub const WipFunction = struct {
                 Value,
                 Instruction.BrCond.Weights,
                 => @enumFromInt(value),
-                MemoryAccessInfo,
                 Instruction.Alloca.Info,
+                Instruction.Load.Info,
+                Instruction.Store.Info,
+                Instruction.CmpXchg.Info,
+                Instruction.AtomicRmw.Info,
                 Instruction.Call.Info,
                 => @bitCast(value),
                 else => @compileError("bad field type: " ++ field.name ++ ": " ++ @typeName(field.type)),
@@ -7121,10 +7236,10 @@ pub const MemoryAccessKind = enum(u1) {
 
         pub fn format(p: Prefixed, w: *Writer) Writer.Error!void {
             switch (p.memory_access_kind) {
-                .normal => return,
+                .normal => {},
                 .@"volatile" => {
                     var vecs: [2][]const u8 = .{ p.prefix, "volatile" };
-                    return w.writeVecAll(&vecs);
+                    try w.writeVecAll(&vecs);
                 },
             }
         }
@@ -7149,10 +7264,10 @@ pub const SyncScope = enum(u1) {
 
         pub fn format(p: Prefixed, w: *Writer) Writer.Error!void {
             switch (p.sync_scope) {
-                .system => return,
+                .system => {},
                 .singlethread => {
                     var vecs: [2][]const u8 = .{ p.prefix, "syncscope(\"singlethread\")" };
-                    return w.writeVecAll(&vecs);
+                    try w.writeVecAll(&vecs);
                 },
             }
         }
@@ -7182,10 +7297,10 @@ pub const AtomicOrdering = enum(u3) {
 
         pub fn format(p: Prefixed, w: *Writer) Writer.Error!void {
             switch (p.atomic_ordering) {
-                .none => return,
+                .none => {},
                 else => {
                     var vecs: [2][]const u8 = .{ p.prefix, @tagName(p.atomic_ordering) };
-                    return w.writeVecAll(&vecs);
+                    try w.writeVecAll(&vecs);
                 },
             }
         }
@@ -7194,16 +7309,6 @@ pub const AtomicOrdering = enum(u3) {
     pub fn fmt(atomic_ordering: AtomicOrdering, prefix: []const u8) Prefixed {
         return .{ .atomic_ordering = atomic_ordering, .prefix = prefix };
     }
-};
-
-const MemoryAccessInfo = packed struct(u32) {
-    access_kind: MemoryAccessKind = .normal,
-    atomic_rmw_operation: Function.Instruction.AtomicRmw.Operation = .none,
-    sync_scope: SyncScope,
-    success_ordering: AtomicOrdering,
-    failure_ordering: AtomicOrdering = .none,
-    alignment: Alignment = .default,
-    _: u13 = undefined,
 };
 
 pub const FastMath = packed struct(u8) {
@@ -7533,7 +7638,7 @@ pub const Constant = enum(u32) {
                 const item = builder.constant_items.get(constant);
                 return switch (item.tag) {
                     .positive_integer => {
-                        const extra: *align(@alignOf(std.math.big.Limb)) Integer =
+                        const extra: *align(@alignOf(std.math.big.Limb)) const Integer =
                             @ptrCast(builder.constant_limbs.items[item.data..][0..Integer.limbs]);
                         const limbs = builder.constant_limbs
                             .items[item.data + Integer.limbs ..][0..extra.limbs_len];
@@ -7565,6 +7670,21 @@ pub const Constant = enum(u32) {
                 };
             },
             .global => return false,
+        }
+    }
+
+    pub fn toInt(self: Constant, builder: *const Builder) ?std.math.big.int.Const {
+        const item = builder.constant_items.get(self.unwrap().constant);
+        switch (item.tag) {
+            .positive_integer, .negative_integer => {
+                const extra: *align(@alignOf(std.math.big.Limb)) const Integer =
+                    @ptrCast(builder.constant_limbs.items[item.data..][0..Integer.limbs]);
+                return .{
+                    .positive = item.tag == .positive_integer,
+                    .limbs = builder.constant_limbs.items[item.data + Integer.limbs ..][0..extra.limbs_len],
+                };
+            },
+            else => return null,
         }
     }
 
@@ -8183,7 +8303,7 @@ pub const Metadata = packed struct(u32) {
     };
 
     pub const DIFlags = packed struct(u32) {
-        Visibility: enum(u2) { Zero, Private, Protected, Public } = .Zero,
+        Visibility: enum(u2) { None, Private, Protected, Public } = .None,
         FwdDecl: bool = false,
         AppleBlock: bool = false,
         ReservedBit4: u1 = 0,
@@ -8199,11 +8319,11 @@ pub const Metadata = packed struct(u32) {
         RValueReference: bool = false,
         ExportSymbols: bool = false,
         Inheritance: enum(u2) {
-            Zero,
+            None,
             SingleInheritance,
             MultipleInheritance,
             VirtualInheritance,
-        } = .Zero,
+        } = .None,
         IntroducedVirtual: bool = false,
         BitField: bool = false,
         NoReturn: bool = false,
@@ -8226,7 +8346,7 @@ pub const Metadata = packed struct(u32) {
                         if (need_pipe) try w.writeAll(" | ") else need_pipe = true;
                         try w.print("DIFlag{s}", .{field.name});
                     },
-                    .@"enum" => if (@field(self, field.name) != .Zero) {
+                    .@"enum" => if (@field(self, field.name) != .None) {
                         if (need_pipe) try w.writeAll(" | ") else need_pipe = true;
                         try w.print("DIFlag{s}", .{@tagName(@field(self, field.name))});
                     },
@@ -8262,7 +8382,7 @@ pub const Metadata = packed struct(u32) {
         };
 
         pub const DISPFlags = packed struct(u32) {
-            Virtuality: enum(u2) { Zero, Virtual, PureVirtual } = .Zero,
+            Virtuality: enum(u2) { None, Virtual, PureVirtual } = .None,
             LocalToUnit: bool = false,
             Definition: bool = false,
             Optimized: bool = false,
@@ -8283,7 +8403,7 @@ pub const Metadata = packed struct(u32) {
                             if (need_pipe) try w.writeAll(" | ") else need_pipe = true;
                             try w.print("DISPFlag{s}", .{field.name});
                         },
-                        .@"enum" => if (@field(self, field.name) != .Zero) {
+                        .@"enum" => if (@field(self, field.name) != .None) {
                             if (need_pipe) try w.writeAll(" | ") else need_pipe = true;
                             try w.print("DISPFlag{s}", .{@tagName(@field(self, field.name))});
                         },
@@ -10007,11 +10127,11 @@ pub fn print(self: *Builder, w: *Writer) (Writer.Error || Allocator.Error)!void 
                             instruction_index.name(&function).fmt(self),
                             tag,
                             extra.info.access_kind.fmt(" "),
-                            extra.info.atomic_rmw_operation,
+                            extra.info.operation,
                             extra.ptr.fmt(function_index, self, .{ .percent = true }),
                             extra.val.fmt(function_index, self, .{ .percent = true }),
                             extra.info.sync_scope.fmt(" "),
-                            extra.info.success_ordering.fmt(" "),
+                            extra.info.ordering.fmt(" "),
                             extra.info.alignment.fmt(", "),
                         });
                     },
@@ -10055,9 +10175,10 @@ pub fn print(self: *Builder, w: *Writer) (Writer.Error || Allocator.Error)!void 
                     .@"tail call",
                     .@"tail call fast",
                     => |tag| {
-                        var extra =
-                            function.extraDataTrail(Function.Instruction.Call, instruction.data);
+                        var extra = function.extraDataTrail(Function.Instruction.Call, instruction.data);
                         const args = extra.trail.next(extra.data.args_len, Value, &function);
+                        const callees =
+                            extra.trail.next(@intFromBool(extra.data.info.has_callees), Metadata, &function);
                         try w.writeAll("  ");
                         const ret_ty = extra.data.ty.functionReturn(self);
                         switch (ret_ty) {
@@ -10089,9 +10210,6 @@ pub fn print(self: *Builder, w: *Writer) (Writer.Error || Allocator.Error)!void 
                             });
                         }
                         try w.writeByte(')');
-                        if (extra.data.info.has_op_bundle_cold) {
-                            try w.writeAll(" [ \"cold\"() ]");
-                        }
                         const call_function_attributes = extra.data.attributes.func(self);
                         if (call_function_attributes != .none) try w.print(" #{d}", .{
                             (try attribute_groups.getOrPutValue(
@@ -10100,15 +10218,19 @@ pub fn print(self: *Builder, w: *Writer) (Writer.Error || Allocator.Error)!void 
                                 {},
                             )).index,
                         });
+                        if (extra.data.info.has_op_bundle_cold) try w.writeAll(" [ \"cold\"() ]");
+                        metadata_formatter.need_comma = true;
+                        defer metadata_formatter.need_comma = undefined;
+                        for (callees) |metadata| try w.print("{f}", .{
+                            try metadata_formatter.fmt("!callees ", metadata, null),
+                        });
                     },
-                    .cmpxchg,
-                    .@"cmpxchg weak",
-                    => |tag| {
-                        const extra =
-                            function.extraData(Function.Instruction.CmpXchg, instruction.data);
-                        try w.print("  %{f} = {t}{f} {f}, {f}, {f}{f}{f}{f}{f}", .{
+                    .cmpxchg => |tag| {
+                        const extra = function.extraData(Function.Instruction.CmpXchg, instruction.data);
+                        try w.print("  %{f} = {t}{f}{f} {f}, {f}, {f}{f}{f}{f}{f}", .{
                             instruction_index.name(&function).fmt(self),
                             tag,
+                            extra.info.kind.fmt(" "),
                             extra.info.access_kind.fmt(" "),
                             extra.ptr.fmt(function_index, self, .{ .percent = true }),
                             extra.cmp.fmt(function_index, self, .{ .percent = true }),
@@ -10143,11 +10265,11 @@ pub fn print(self: *Builder, w: *Writer) (Writer.Error || Allocator.Error)!void 
                         for (indices) |index| try w.print(", {d}", .{index});
                     },
                     .fence => |tag| {
-                        const info: MemoryAccessInfo = @bitCast(instruction.data);
+                        const fence: Function.Instruction.Fence = @bitCast(instruction.data);
                         try w.print("  {t}{f}{f}", .{
                             tag,
-                            info.sync_scope.fmt(" "),
-                            info.success_ordering.fmt(" "),
+                            fence.sync_scope.fmt(" "),
+                            fence.success_ordering.fmt(" "),
                         });
                     },
                     .fneg,
@@ -10221,16 +10343,22 @@ pub fn print(self: *Builder, w: *Writer) (Writer.Error || Allocator.Error)!void 
                     .load,
                     .@"load atomic",
                     => |tag| {
-                        const extra = function.extraData(Function.Instruction.Load, instruction.data);
+                        var extra = function.extraDataTrail(Function.Instruction.Load, instruction.data);
+                        const range = extra.trail.next(@intFromBool(extra.data.info.has_range), Metadata, &function);
                         try w.print("  %{f} = {t}{f} {f}, {f}{f}{f}{f}", .{
                             instruction_index.name(&function).fmt(self),
                             tag,
-                            extra.info.access_kind.fmt(" "),
-                            extra.type.fmt(self, .percent),
-                            extra.ptr.fmt(function_index, self, .{ .percent = true }),
-                            extra.info.sync_scope.fmt(" "),
-                            extra.info.success_ordering.fmt(" "),
-                            extra.info.alignment.fmt(", "),
+                            extra.data.info.access_kind.fmt(" "),
+                            extra.data.type.fmt(self, .percent),
+                            extra.data.ptr.fmt(function_index, self, .{ .percent = true }),
+                            extra.data.info.sync_scope.fmt(" "),
+                            extra.data.info.ordering.fmt(" "),
+                            extra.data.info.alignment.fmt(", "),
+                        });
+                        metadata_formatter.need_comma = true;
+                        defer metadata_formatter.need_comma = undefined;
+                        for (range) |metadata| if (metadata.unwrap(self) != Metadata.empty_tuple) try w.print("{f}", .{
+                            try metadata_formatter.fmt("!range ", metadata, null),
                         });
                     },
                     .phi,
@@ -10296,7 +10424,7 @@ pub fn print(self: *Builder, w: *Writer) (Writer.Error || Allocator.Error)!void 
                             extra.val.fmt(function_index, self, .{ .percent = true }),
                             extra.ptr.fmt(function_index, self, .{ .percent = true }),
                             extra.info.sync_scope.fmt(" "),
-                            extra.info.success_ordering.fmt(" "),
+                            extra.info.ordering.fmt(" "),
                             extra.info.alignment.fmt(", "),
                         });
                     },
@@ -12291,9 +12419,12 @@ pub fn debugFloatType(
     return self.debugFloatTypeAssumeCapacity(name, size_in_bits);
 }
 
-pub fn debugForwardReference(self: *Builder) Allocator.Error!Metadata {
+/// Deprecated, use `metadataForwardReference`.
+pub const debugForwardReference = metadataForwardReference;
+
+pub fn metadataForwardReference(self: *Builder) Allocator.Error!Metadata {
     try self.metadata_forward_references.ensureUnusedCapacity(self.gpa, 1);
-    return self.debugForwardReferenceAssumeCapacity();
+    return self.metadataForwardReferenceAssumeCapacity();
 }
 
 pub fn debugStructType(
@@ -12521,15 +12652,8 @@ pub fn debugExpression(self: *Builder, elements: []const u32) Allocator.Error!Me
 }
 
 pub fn metadataTuple(self: *Builder, elements: []const Metadata) Allocator.Error!Metadata {
-    return self.metadataTupleOptionals(@ptrCast(elements));
-}
-
-pub fn metadataTupleOptionals(
-    self: *Builder,
-    elements: []const Metadata.Optional,
-) Allocator.Error!Metadata {
     try self.ensureUnusedMetadataCapacity(1, Metadata.Tuple, elements.len);
-    return self.metadataTupleOptionalsAssumeCapacity(elements);
+    return self.metadataTupleAssumeCapacity(elements);
 }
 
 pub fn debugLocalVar(
@@ -12595,9 +12719,12 @@ pub fn metadataConstant(self: *Builder, value: Constant) Allocator.Error!Metadat
     return self.metadataConstantAssumeCapacity(value);
 }
 
+/// Deprecated, use `resolveMetadataForwardReference`.
+pub const resolveDebugForwardReference = resolveMetadataForwardReference;
+
 /// Resolves the given forward reference to the given value (which is not itself a forward
 /// reference). If the forward reference is already resolved, its target is replaced.
-pub fn resolveDebugForwardReference(self: *Builder, fwd_ref: Metadata, value: Metadata) void {
+pub fn resolveMetadataForwardReference(self: *Builder, fwd_ref: Metadata, value: Metadata) void {
     assert(fwd_ref.kind == .forward);
     assert(value.kind != .forward);
     self.metadata_forward_references.items[fwd_ref.index] = value.toOptional();
@@ -12790,8 +12917,7 @@ fn debugFloatTypeAssumeCapacity(self: *Builder, name: ?Metadata.String, size_in_
     });
 }
 
-fn debugForwardReferenceAssumeCapacity(self: *Builder) Metadata {
-    assert(!self.strip);
+fn metadataForwardReferenceAssumeCapacity(self: *Builder) Metadata {
     const index = self.metadata_forward_references.items.len;
     self.metadata_forward_references.appendAssumeCapacity(.none);
     return .{ .index = @intCast(index), .kind = .forward };
@@ -13164,9 +13290,9 @@ fn debugExpressionAssumeCapacity(self: *Builder, elements: []const u32) Metadata
     return .{ .index = @intCast(gop.index), .kind = .node };
 }
 
-fn metadataTupleOptionalsAssumeCapacity(self: *Builder, elements: []const Metadata.Optional) Metadata {
+fn metadataTupleAssumeCapacity(self: *Builder, elements: []const Metadata) Metadata {
     const Key = struct {
-        elements: []const Metadata.Optional,
+        elements: []const Metadata,
     };
     const Adapter = struct {
         builder: *const Builder,
@@ -13181,9 +13307,9 @@ fn metadataTupleOptionalsAssumeCapacity(self: *Builder, elements: []const Metada
             const rhs_data = ctx.builder.metadata_items.items(.data)[rhs_index];
             var rhs_extra = ctx.builder.metadataExtraDataTrail(Metadata.Tuple, rhs_data);
             return std.mem.eql(
-                Metadata.Optional,
+                Metadata,
                 lhs_key.elements,
-                rhs_extra.trail.next(rhs_extra.data.elements_len, Metadata.Optional, ctx.builder),
+                rhs_extra.trail.next(rhs_extra.data.elements_len, Metadata, ctx.builder),
             );
         }
     };
@@ -13949,7 +14075,7 @@ pub fn toBitcode(self: *Builder, allocator: Allocator, producer: Producer) bitco
                     .positive_integer,
                     .negative_integer,
                     => |tag| {
-                        const extra: *align(@alignOf(std.math.big.Limb)) Constant.Integer =
+                        const extra: *align(@alignOf(std.math.big.Limb)) const Constant.Integer =
                             @ptrCast(self.constant_limbs.items[data..][0..Constant.Integer.limbs]);
                         const bigint: std.math.big.int.Const = .{
                             .limbs = self.constant_limbs
@@ -15109,7 +15235,7 @@ pub fn toBitcode(self: *Builder, allocator: Allocator, producer: Producer) bitco
                                 .ty = extra.type,
                                 .alignment = extra.info.alignment.toLlvm(),
                                 .is_volatile = extra.info.access_kind == .@"volatile",
-                                .success_ordering = extra.info.success_ordering,
+                                .ordering = extra.info.ordering,
                                 .sync_scope = extra.info.sync_scope,
                             });
                         },
@@ -15129,7 +15255,7 @@ pub fn toBitcode(self: *Builder, allocator: Allocator, producer: Producer) bitco
                                 .val = adapter.getOffsetValueIndex(extra.val),
                                 .alignment = extra.info.alignment.toLlvm(),
                                 .is_volatile = extra.info.access_kind == .@"volatile",
-                                .success_ordering = extra.info.success_ordering,
+                                .ordering = extra.info.ordering,
                                 .sync_scope = extra.info.sync_scope,
                             });
                         },
@@ -15212,18 +15338,15 @@ pub fn toBitcode(self: *Builder, allocator: Allocator, producer: Producer) bitco
                             try function_block.writeAbbrev(FunctionBlock.AtomicRmw{
                                 .ptr = adapter.getOffsetValueIndex(extra.ptr),
                                 .val = adapter.getOffsetValueIndex(extra.val),
-                                .operation = extra.info.atomic_rmw_operation,
+                                .operation = extra.info.operation,
                                 .is_volatile = extra.info.access_kind == .@"volatile",
-                                .success_ordering = extra.info.success_ordering,
+                                .ordering = extra.info.ordering,
                                 .sync_scope = extra.info.sync_scope,
                                 .alignment = extra.info.alignment.toLlvm(),
                             });
                         },
-                        .cmpxchg,
-                        .@"cmpxchg weak",
-                        => |kind| {
+                        .cmpxchg => {
                             const extra = func.extraData(Function.Instruction.CmpXchg, data);
-
                             try function_block.writeAbbrev(FunctionBlock.CmpXchg{
                                 .ptr = adapter.getOffsetValueIndex(extra.ptr),
                                 .cmp = adapter.getOffsetValueIndex(extra.cmp),
@@ -15232,15 +15355,15 @@ pub fn toBitcode(self: *Builder, allocator: Allocator, producer: Producer) bitco
                                 .success_ordering = extra.info.success_ordering,
                                 .sync_scope = extra.info.sync_scope,
                                 .failure_ordering = extra.info.failure_ordering,
-                                .is_weak = kind == .@"cmpxchg weak",
+                                .is_weak = extra.info.kind == .weak,
                                 .alignment = extra.info.alignment.toLlvm(),
                             });
                         },
                         .fence => {
-                            const info: MemoryAccessInfo = @bitCast(data);
+                            const fence: Function.Instruction.Fence = @bitCast(data);
                             try function_block.writeAbbrev(FunctionBlock.Fence{
-                                .ordering = info.success_ordering,
-                                .sync_scope = info.sync_scope,
+                                .ordering = fence.success_ordering,
+                                .sync_scope = fence.sync_scope,
                             });
                         },
                     }
@@ -15313,17 +15436,58 @@ pub fn toBitcode(self: *Builder, allocator: Allocator, producer: Producer) bitco
                             };
                             switch (weights) {
                                 .none => {},
-                                .unpredictable => try metadata_attach_block.writeAbbrevAdapted(MetadataAttachmentBlock.AttachmentInstructionSingle{
-                                    .inst = instr_index,
-                                    .kind = .unpredictable,
-                                    .metadata = .empty_tuple,
-                                }, metadata_adapter),
-                                _ => try metadata_attach_block.writeAbbrevAdapted(MetadataAttachmentBlock.AttachmentInstructionSingle{
-                                    .inst = instr_index,
-                                    .kind = .prof,
-                                    .metadata = weights.toMetadata(),
-                                }, metadata_adapter),
+                                .unpredictable => try metadata_attach_block.writeAbbrevAdapted(
+                                    MetadataAttachmentBlock.AttachmentInstructionSingle{
+                                        .inst = instr_index,
+                                        .kind = .unpredictable,
+                                        .metadata = .empty_tuple,
+                                    },
+                                    metadata_adapter,
+                                ),
+                                _ => try metadata_attach_block.writeAbbrevAdapted(
+                                    MetadataAttachmentBlock.AttachmentInstructionSingle{
+                                        .inst = instr_index,
+                                        .kind = .prof,
+                                        .metadata = weights.toMetadata(),
+                                    },
+                                    metadata_adapter,
+                                ),
                             }
+                            instr_index += 1;
+                        },
+                        .call,
+                        .@"call fast",
+                        .@"musttail call",
+                        .@"musttail call fast",
+                        .@"notail call",
+                        .@"notail call fast",
+                        .@"tail call",
+                        .@"tail call fast",
+                        => {
+                            var extra = func.extraDataTrail(Function.Instruction.Call, data);
+                            _ = extra.trail.next(extra.data.args_len, Value, &func);
+                            const callees = extra.trail.next(@intFromBool(extra.data.info.has_callees), Metadata, &func);
+                            for (callees) |metadata| try metadata_attach_block.writeAbbrevAdapted(
+                                MetadataAttachmentBlock.AttachmentInstructionSingle{
+                                    .inst = instr_index,
+                                    .kind = .callees,
+                                    .metadata = metadata,
+                                },
+                                metadata_adapter,
+                            );
+                            instr_index += 1;
+                        },
+                        .load, .@"load atomic" => {
+                            var extra = func.extraDataTrail(Function.Instruction.Load, data);
+                            const range = extra.trail.next(@intFromBool(extra.data.info.has_range), Metadata, &func);
+                            for (range) |metadata| if (metadata.unwrap(self) != Metadata.empty_tuple) try metadata_attach_block.writeAbbrevAdapted(
+                                MetadataAttachmentBlock.AttachmentInstructionSingle{
+                                    .inst = instr_index,
+                                    .kind = .range,
+                                    .metadata = metadata,
+                                },
+                                metadata_adapter,
+                            );
                             instr_index += 1;
                         },
                     };

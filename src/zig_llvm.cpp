@@ -51,6 +51,7 @@
 #include <llvm/Target/CodeGenCWrappers.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
+#include <llvm/Transforms/IPO/GlobalOpt.h>
 #include <llvm/Transforms/Instrumentation/ThreadSanitizer.h>
 #include <llvm/Transforms/Instrumentation/SanitizerCoverage.h>
 #include <llvm/Transforms/Scalar.h>
@@ -348,6 +349,10 @@ ZIG_EXTERN_C bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machi
     });
 
     pass_builder.registerOptimizerLastEPCallback([&](ModulePassManager &module_pm, OptimizationLevel level, ThinOrFullLTOPhase lto_phase) {
+        // Restricted enums require an extra global optimization pass sometime after
+        // DropUnnecessaryAssumesPass to fully eliminate the helper global variables.
+        if (level.isOptimizingForSize()) module_pm.addPass(GlobalOptPass());
+
         if (!early_san) {
             // Code coverage instrumentation.
             if (options->sancov) {
@@ -402,6 +407,11 @@ ZIG_EXTERN_C bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machi
             *error_message = strdup("TargetMachine can't emit an assembly file");
             return true;
         }
+    }
+
+    if (false) {
+        module_pm.printPipeline(outs(), [](StringRef S) { return S; });
+        outs() << '\n';
     }
 
     // Optimization phase

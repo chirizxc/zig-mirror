@@ -4165,9 +4165,14 @@ pub const UnionLayout = struct {
 pub fn unionTagFieldIndex(zcu: *const Zcu, loaded_union: InternPool.LoadedUnionType, enum_tag: Value) ?u32 {
     const ip = &zcu.intern_pool;
     if (enum_tag.toIntern() == .none) return null;
-    const enum_tag_key = ip.indexToKey(enum_tag.toIntern()).enum_tag;
-    assert(enum_tag_key.ty == loaded_union.enum_tag_type);
-    const loaded_enum = ip.loadEnumType(loaded_union.enum_tag_type);
+    const enum_tag_key = switch (ip.indexToKey(enum_tag.toIntern())) {
+        else => unreachable,
+        .enum_tag => |enum_tag_key| enum_tag_key,
+        .restricted_value => |restricted_value| ip.indexToKey(restricted_value.unrestricted_value).enum_tag,
+    };
+    const enum_tag_ty: Type = .fromInterned(loaded_union.enum_tag_type);
+    assert(enum_tag_key.ty == (enum_tag_ty.unrestrictedType(zcu) orelse enum_tag_ty).toIntern());
+    const loaded_enum = ip.loadEnumType(enum_tag_key.ty);
     return loaded_enum.tagValueIndex(ip, enum_tag_key.int);
 }
 

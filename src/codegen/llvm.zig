@@ -626,8 +626,8 @@ pub const Object = struct {
                     try builder.metadataString(compile_unit_dir),
                 );
 
-                const debug_enums_fwd_ref = try builder.debugForwardReference();
-                const debug_globals_fwd_ref = try builder.debugForwardReference();
+                const debug_enums_fwd_ref = try builder.metadataForwardReference();
+                const debug_globals_fwd_ref = try builder.metadataForwardReference();
 
                 const debug_compile_unit = try builder.debugCompileUnit(
                     debug_file,
@@ -701,9 +701,12 @@ pub const Object = struct {
     const RestrictedDecls = struct {
         len: Builder.Variable.Index,
         array: Builder.Variable.Index,
+        enum_seen: []const Builder.Variable.Index,
         values: std.array_hash_map.Auto(InternPool.Index, Builder.Constant),
+        metadata: Builder.Metadata.Optional,
 
         fn deinit(rd: *RestrictedDecls, gpa: Allocator) void {
+            gpa.free(rd.enum_seen);
             rd.values.deinit(gpa);
             rd.* = undefined;
         }
@@ -716,7 +719,8 @@ pub const Object = struct {
         const zcu = o.zcu;
         const target = zcu.getTarget();
         const ip = &zcu.intern_pool;
-        const unrestricted_ty = restricted_ty.unrestrictedType(zcu).?;
+        const restricted_type_key = ip.indexToKey(restricted_ty.toIntern()).restricted_type;
+        const unrestricted_type = restricted_type_key.unrestricted_type;
 
         const ty_name = ip.loadRestrictedType(restricted_ty.toIntern()).name.toSlice(ip);
         gop.value_ptr.* = .{
@@ -730,7 +734,28 @@ pub const Object = struct {
                 .void,
                 .default,
             ),
+            .enum_seen = if (ip.isEnumType(unrestricted_type)) enum_seen: {
+                const owner_mod = zcu.fileByIndex(restricted_type_key.zir_index.resolveFile(ip)).mod.?;
+                if (owner_mod.optimize_mode != .ReleaseSmall) break :enum_seen &.{};
+                const field_names = ip.loadEnumType(unrestricted_type).field_names;
+                const enum_seen = try o.gpa.alloc(Builder.Variable.Index, field_names.len);
+                errdefer o.gpa.free(enum_seen);
+                for (enum_seen, field_names.get(ip)) |*global, field_name| {
+                    global.* = try o.builder.addVariable(
+                        try o.builder.strtabStringFmt("{s}.{f}", .{ ty_name, field_name.fmt(ip) }),
+                        .i1,
+                        .default,
+                    );
+                    global.setLinkage(.private, &o.builder);
+                    global.setMutability(.global, &o.builder);
+                    global.setAlignment(InternPool.Alignment.@"1".toLlvm(), &o.builder);
+                    global.setUnnamedAddr(.unnamed_addr, &o.builder);
+                    try global.setInitializer(.false, &o.builder);
+                }
+                break :enum_seen enum_seen;
+            } else &.{},
             .values = .empty,
+            .metadata = .none,
         };
         gop.value_ptr.len.setLinkage(.private, &o.builder);
         gop.value_ptr.len.setMutability(.constant, &o.builder);
@@ -738,23 +763,80 @@ pub const Object = struct {
         gop.value_ptr.len.setUnnamedAddr(.unnamed_addr, &o.builder);
         gop.value_ptr.array.setLinkage(.private, &o.builder);
         gop.value_ptr.array.setMutability(.constant, &o.builder);
-        gop.value_ptr.array.setAlignment(unrestricted_ty.abiAlignment(zcu).toLlvm(), &o.builder);
-        // Setting unnamed_addr here would reduce safety, and the module emitting the safety checks may not be the same module
-        // that defined the restricted type. In any case, llvm will add unnamed_addr itself if no safety checks end up being emitted.
-        gop.value_ptr.array.setUnnamedAddr(.default, &o.builder);
+        gop.value_ptr.array.setAlignment(Type.fromInterned(unrestricted_type).abiAlignment(zcu).toLlvm(), &o.builder);
+        gop.value_ptr.array.setUnnamedAddr(.unnamed_addr, &o.builder);
         return gop.value_ptr;
     }
     fn genRestrictedDecls(o: *Object) Allocator.Error!void {
-        for (o.restricted_map.values()) |restricted_decls| {
+        const zcu = o.zcu;
+        const ip = &zcu.intern_pool;
+        for (o.restricted_map.keys(), o.restricted_map.values()) |restricted_ty, restricted_decls| {
             const len = restricted_decls.values.count();
             try restricted_decls.len.setInitializer(try o.builder.intConst(.i32, len), &o.builder);
             try restricted_decls.array.setInitializer(switch (len) {
-                0 => try o.builder.zeroInitConst(.i8), // ensure unique address
+                0 => try o.builder.structConst(try o.builder.structType(.normal, &.{}), &.{}),
                 else => try o.builder.arrayConst(
                     try o.builder.arrayType(len, restricted_decls.values.values()[0].typeOf(&o.builder)),
                     restricted_decls.values.values(),
                 ),
             }, &o.builder);
+            if (restricted_decls.metadata.unwrap()) |metadata| {
+                const gpa = zcu.gpa;
+                const unrestricted_ty = ip.indexToKey(restricted_ty).restricted_type.unrestricted_type;
+                if (ip.isPointerType(unrestricted_ty)) {
+                    assert(ip.isFunctionType(ip.indexToKey(unrestricted_ty).ptr_type.child));
+                    const callees = try gpa.alloc(Builder.Metadata, len);
+                    defer gpa.free(callees);
+                    for (callees, restricted_decls.values.values()) |*callee, value|
+                        callee.* = try o.builder.metadataConstant(value);
+                    o.builder.resolveMetadataForwardReference(metadata, try o.builder.metadataTuple(callees));
+                } else {
+                    assert(Type.fromInterned(unrestricted_ty).isAbiInt(zcu));
+                    const ints = try gpa.alloc(std.math.big.int.Const, len);
+                    defer gpa.free(ints);
+                    var range: std.ArrayList(Builder.Metadata) = .empty;
+                    defer range.deinit(gpa);
+                    o.builder.resolveMetadataForwardReference(metadata, range: {
+                        if (len == 0) break :range .empty_tuple;
+                        const values = restricted_decls.values.values();
+                        for (ints, values) |*int, value| int.* = value.toInt(&o.builder) orelse
+                            break :range .empty_tuple;
+                        std.mem.sortUnstable(std.math.big.int.Const, ints, {}, struct {
+                            fn lessThan(_: void, lhs: std.math.big.int.Const, rhs: std.math.big.int.Const) bool {
+                                return lhs.order(rhs).compare(.lt);
+                            }
+                        }.lessThan);
+                        var int_ty = values[0].typeOf(&o.builder);
+                        var start = ints[0];
+                        var end: std.math.big.int.Mutable = .{
+                            .limbs = try gpa.alloc(
+                                std.math.big.Limb,
+                                std.math.big.int.calcNonZeroTwosCompLimbCount(int_ty.scalarBits(&o.builder)),
+                            ),
+                            .len = undefined,
+                            .positive = undefined,
+                        };
+                        defer gpa.free(end.limbs);
+                        end.copy(start);
+                        for (ints[1..]) |int| {
+                            end.addScalar(end.toConst(), 1);
+                            if (end.toConst().eql(int)) continue;
+                            try range.appendSlice(gpa, &.{
+                                try o.builder.metadataConstant(try o.builder.bigIntConst(int_ty, start)),
+                                try o.builder.metadataConstant(try o.builder.bigIntConst(int_ty, end.toConst())),
+                            });
+                            start = int;
+                            end.copy(int);
+                        }
+                        end.addScalar(end.toConst(), 1);
+                        try range.appendSlice(gpa, &.{
+                            try o.builder.metadataConstant(try o.builder.bigIntConst(int_ty, start)),
+                            try o.builder.metadataConstant(try o.builder.bigIntConst(int_ty, end.toConst())),
+                        });
+                        break :range try o.builder.metadataTuple(range.items);
+                    });
+                }
+            }
         }
     }
 
@@ -861,17 +943,17 @@ pub const Object = struct {
             if (!o.builder.strip) {
                 if (o.debug_anyerror_fwd_ref.unwrap()) |fwd_ref| {
                     const debug_anyerror_type = try o.lowerDebugAnyerrorType();
-                    o.builder.resolveDebugForwardReference(fwd_ref, debug_anyerror_type);
+                    o.builder.resolveMetadataForwardReference(fwd_ref, debug_anyerror_type);
                 }
 
                 try o.flushTypePool(pt);
 
-                o.builder.resolveDebugForwardReference(
+                o.builder.resolveMetadataForwardReference(
                     o.debug_enums_fwd_ref.unwrap().?,
                     try o.builder.metadataTuple(o.debug_enums.items),
                 );
 
-                o.builder.resolveDebugForwardReference(
+                o.builder.resolveMetadataForwardReference(
                     o.debug_globals_fwd_ref.unwrap().?,
                     try o.builder.metadataTuple(o.debug_globals.items),
                 );
@@ -1936,7 +2018,7 @@ pub const Object = struct {
         if (!o.builder.strip) {
             assert(@intFromEnum(index) == o.debug_types.items.len);
             try o.debug_types.ensureUnusedCapacity(gpa, 1);
-            const fwd_ref = try o.builder.debugForwardReference();
+            const fwd_ref = try o.builder.metadataForwardReference();
             o.debug_types.appendAssumeCapacity(fwd_ref);
             if (val == .anyerror_type) {
                 assert(o.debug_anyerror_fwd_ref.is_none);
@@ -1968,7 +2050,7 @@ pub const Object = struct {
                 .@"fn" => try o.builder.debugSubroutineType(null),
                 else => try o.builder.debugSignedType(name_str, 0),
             };
-            o.builder.resolveDebugForwardReference(fwd_ref, debug_incomplete_type);
+            o.builder.resolveMetadataForwardReference(fwd_ref, debug_incomplete_type);
         }
     }
     /// Should only be called by the `link.ConstPool` implementation.
@@ -1992,7 +2074,7 @@ pub const Object = struct {
                 assert(o.debug_anyerror_fwd_ref == fwd_ref.toOptional());
             } else {
                 const debug_type = try o.lowerDebugType(pt, ty, fwd_ref);
-                o.builder.resolveDebugForwardReference(fwd_ref, debug_type);
+                o.builder.resolveMetadataForwardReference(fwd_ref, debug_type);
             }
         }
     }
@@ -2527,7 +2609,7 @@ pub const Object = struct {
                 const payload_fwd_ref = if (layout.tag_size == 0)
                     ty_fwd_ref
                 else
-                    try o.builder.debugForwardReference();
+                    try o.builder.metadataForwardReference();
 
                 for (0..union_type.field_types.len) |field_index| {
                     const field_ty = union_type.field_types.get(ip)[field_index];
@@ -2566,7 +2648,7 @@ pub const Object = struct {
                     return debug_payload_type;
                 }
 
-                o.builder.resolveDebugForwardReference(payload_fwd_ref, debug_payload_type);
+                o.builder.resolveMetadataForwardReference(payload_fwd_ref, debug_payload_type);
 
                 const tag_offset: u64, const payload_offset: u64 = offsets: {
                     if (layout.tag_align.compare(.gte, layout.payload_align)) {
@@ -3988,6 +4070,11 @@ pub const Object = struct {
                 const restricted_decls = try o.getRestrictedDecls(ty);
                 const gop = try restricted_decls.values.getOrPut(o.gpa, arg_val);
                 if (!gop.found_existing) gop.value_ptr.* = try o.lowerValue(restricted_value.unrestricted_value);
+                if (restricted_decls.enum_seen.len > 0) enum_seen: {
+                    const unrestricted_val: Value = .fromInterned(restricted_value.unrestricted_value);
+                    const tag_index = unrestricted_val.typeOf(zcu).enumTagFieldIndex(unrestricted_val, zcu) orelse break :enum_seen;
+                    try restricted_decls.enum_seen[tag_index].setInitializer(.true, &o.builder);
+                }
                 return o.builder.intConst(.i32, gop.index);
             },
             .memoized_call => unreachable,
@@ -4002,37 +4089,29 @@ pub const Object = struct {
         const zcu = o.zcu;
         const ptr = zcu.intern_pool.indexToKey(ptr_val).ptr;
         const offset: u64 = prev_offset + ptr.byte_offset;
-        return switch (ptr.base_addr) {
-            .nav => |nav| {
-                const base_ptr = try o.lowerNavRef(nav);
-                return o.builder.gepConst(.inbounds, .i8, base_ptr, null, &.{
-                    try o.builder.intConst(.i64, offset),
-                });
-            },
+        const base_ptr = base_ptr: switch (ptr.base_addr) {
+            .nav => |nav| try o.lowerNavRef(nav),
             .uav => |uav| {
                 const orig_ptr_ty: Type = .fromInterned(uav.orig_ty);
-                const base_ptr = try o.lowerUavRef(
+                break :base_ptr try o.lowerUavRef(
                     uav.val,
                     orig_ptr_ty.ptrAlignment(zcu),
                     orig_ptr_ty.ptrAddressSpace(zcu),
                 );
-                return o.builder.gepConst(.inbounds, .i8, base_ptr, null, &.{
-                    try o.builder.intConst(.i64, offset),
-                });
             },
-            .int => try o.builder.castConst(
+            .int => return o.builder.castConst(
                 .inttoptr,
                 try o.builder.intConst(try o.lowerType(.usize), offset),
                 try o.lowerType(.fromInterned(ptr.ty)),
             ),
-            .eu_payload => |eu_ptr| try o.lowerPtr(
+            .eu_payload => |eu_ptr| return o.lowerPtr(
                 eu_ptr,
                 offset + codegen.errUnionPayloadOffset(
                     Value.fromInterned(eu_ptr).typeOf(zcu).childType(zcu),
                     zcu,
                 ),
             ),
-            .opt_payload => |opt_ptr| try o.lowerPtr(opt_ptr, offset),
+            .opt_payload => |opt_ptr| return o.lowerPtr(opt_ptr, offset),
             .field => |field| {
                 const agg_ty = Value.fromInterned(field.base).typeOf(zcu).childType(zcu);
                 const field_off: u64 = switch (agg_ty.zigTypeTag(zcu)) {
@@ -4061,6 +4140,10 @@ pub const Object = struct {
             .comptime_field => unreachable,
             .comptime_alloc => unreachable,
         };
+        if (offset == 0) return base_ptr;
+        return o.builder.gepConst(.inbounds, .i8, base_ptr, null, &.{
+            try o.builder.intConst(.i64, offset),
+        });
     }
 
     pub fn lowerPtrToVoid(

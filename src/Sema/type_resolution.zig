@@ -694,8 +694,9 @@ pub fn resolveUnionLayout(sema: *Sema, union_ty: Type) CompileError!void {
                     break :tag_ty try sema.analyzeAsType(&block, tag_type_src, .union_enum_tag_type, type_ref);
                 },
             };
+            const unrestricted_tag_ty = tag_ty.unrestrictedType(zcu) orelse tag_ty;
             // Because the type is explicitly specified, we need to validate it.
-            if (tag_ty.zigTypeTag(zcu) != .@"enum") return sema.fail(
+            if (unrestricted_tag_ty.zigTypeTag(zcu) != .@"enum") return sema.fail(
                 &block,
                 block.src(.container_arg),
                 "expected enum tag type, found '{f}'",
@@ -738,9 +739,10 @@ pub fn resolveUnionLayout(sema: *Sema, union_ty: Type) CompileError!void {
             },
         },
     };
+    const unrestricted_enum_tag_ty = enum_tag_ty.unrestrictedType(zcu) orelse enum_tag_ty;
 
-    try sema.ensureLayoutResolved(enum_tag_ty, block.src(.container_arg), .backing_enum);
-    const enum_obj = ip.loadEnumType(enum_tag_ty.toIntern());
+    try sema.ensureLayoutResolved(unrestricted_enum_tag_ty, block.src(.container_arg), .backing_enum);
+    const enum_obj = ip.loadEnumType(unrestricted_enum_tag_ty.toIntern());
 
     if (union_obj.is_reified) {
         // We have field names in `union_obj.reified_field_names`, but we haven't

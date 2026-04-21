@@ -7998,7 +7998,7 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
             });
         },
         .restricted_value => |restricted_value| {
-            assert(restricted_value.ty.unwrap(ip).getTag(ip) == .type_restricted);
+            assert(ip.isRestrictedType(restricted_value.ty));
             assert(!ip.isUndef(restricted_value.unrestricted_value));
             items.appendAssumeCapacity(.{
                 .tag = .restricted_value,
@@ -9019,7 +9019,10 @@ pub fn getUnion(
 ) Allocator.Error!Index {
     assert(un.ty != .none);
     assert(un.val != .none);
-    assert(ip.loadUnionType(un.ty).layout != .@"packed");
+
+    const loaded_union = ip.loadUnionType(un.ty);
+    assert(loaded_union.layout != .@"packed");
+    assert(loaded_union.enum_tag_type == ip.typeOf(un.tag));
 
     var gop = try ip.getOrPutKey(gpa, io, tid, .{ .un = un });
     defer gop.deinit();

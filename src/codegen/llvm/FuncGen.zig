@@ -826,7 +826,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
         };
     }
 
-    const call = try self.wip.call(
+    const call = try self.wip.callMetadata(
         switch (modifier) {
             .auto, .never_inline => .normal,
             .never_tail => .notail,
@@ -838,6 +838,17 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
         try o.lowerType(zig_fn_ty),
         llvm_fn,
         llvm_args.items,
+        .{
+            .callees = if (air_call.callee.toIndex()) |callee_inst| switch (self.air.instructions.items(.tag)[@intFromEnum(callee_inst)]) {
+                else => .none,
+                .unwrap_restricted, .unwrap_restricted_safe => callees: {
+                    const restricted_ty = self.typeOf(self.air.instructions.items(.data)[@intFromEnum(callee_inst)].ty_op.operand);
+                    const restricted_decls = try o.getRestrictedDecls(restricted_ty);
+                    if (restricted_decls.metadata.is_none) restricted_decls.metadata = .wrap(try o.builder.metadataForwardReference());
+                    break :callees restricted_decls.metadata;
+                },
+            } else .none,
+        },
         "",
     );
 
@@ -1667,6 +1678,7 @@ fn lowerTry(
 fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) TodoError!void {
     const o = self.object;
     const zcu = o.zcu;
+    const ip = &zcu.intern_pool;
 
     const switch_br = self.air.unwrapSwitch(inst);
 
@@ -1694,6 +1706,7 @@ fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Tod
     // This asm is really, really, not what we want. As such, we will construct the jump table manually where
     // appropriate (the values are dense and relatively few), and use it when lowering dispatches.
 
+    const cond_ty = self.typeOf(switch_br.operand);
     const jmp_table: ?SwitchDispatchInfo.JmpTable = jmp_table: {
         if (!is_dispatch_loop) break :jmp_table null;
 
@@ -1706,7 +1719,6 @@ fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Tod
         // about acceptable - it won't fill L1d cache on most CPUs.
         const max_table_len = 1024;
 
-        const cond_ty = self.typeOf(switch_br.operand);
         switch (cond_ty.zigTypeTag(zcu)) {
             .bool, .pointer => break :jmp_table null,
             .@"enum", .int, .error_set, .@"struct", .@"union" => {},
@@ -1859,6 +1871,18 @@ fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Tod
         assert(self.switch_dispatch_info.remove(inst));
     };
 
+    const restricted_enum_seen = if (ip.isEnumType(cond_ty.toIntern())) restricted_enum_seen: {
+        const operand_inst = switch_br.operand.toIndex() orelse break :restricted_enum_seen &.{};
+        switch (self.air.instructions.items(.tag)[@intFromEnum(operand_inst)]) {
+            else => break :restricted_enum_seen &.{},
+            .unwrap_restricted, .unwrap_restricted_safe => {
+                const restricted_ty = self.typeOf(self.air.instructions.items(.data)[@intFromEnum(operand_inst)].ty_op.operand);
+                const restricted_decls = try o.getRestrictedDecls(restricted_ty);
+                break :restricted_enum_seen restricted_decls.enum_seen;
+            },
+        }
+    } else &.{};
+
     // Generate the initial dispatch.
     // If this is a simple `switch_br`, this is the only dispatch.
     try self.lowerSwitchDispatch(inst, switch_br.operand, dispatch_info);
@@ -1869,6 +1893,16 @@ fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Tod
         const case_block = case_blocks[case.idx];
         self.wip.cursor = .{ .block = case_block };
         if (switch_br.getHint(case.idx) == .cold) _ = try self.wip.callIntrinsicAssumeCold();
+        if (restricted_enum_seen.len > 0) restricted_enum_seen: {
+            var maybe_any_seen: ?Builder.Value = null;
+            for (case.items) |item| {
+                const tag_index = cond_ty.enumTagFieldIndex(.fromInterned(item.toInterned().?), zcu) orelse break :restricted_enum_seen;
+                const tag_seen = try self.wip.load(.normal, .i1, restricted_enum_seen[tag_index].toValue(&o.builder), InternPool.Alignment.@"1".toLlvm(), "");
+                maybe_any_seen = if (maybe_any_seen) |any_seen| try self.wip.bin(.@"or", any_seen, tag_seen, "") else tag_seen;
+            }
+            assert(case.ranges.len == 0); // not supported by Sema yet
+            _ = try self.wip.callIntrinsic(.normal, .none, .assume, &.{}, &.{maybe_any_seen.?}, "");
+        }
         try self.genBodyDebugScope(null, case.body, .none);
     }
     self.wip.cursor = .{ .block = case_blocks[case_blocks.len - 1] };
@@ -2124,11 +2158,7 @@ fn airSliceElemVal(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder
     const elem_align = slice_ty.ptrAlignment(zcu).min(elem_ty.abiAlignment(zcu));
     const access_kind: Builder.MemoryAccessKind = if (slice_info.flags.is_volatile) .@"volatile" else .normal;
     self.maybeMarkAllowZeroAccess(slice_info);
-    if (isByRef(elem_ty, zcu)) {
-        return self.loadByRef(ptr, elem_ty, elem_align.toLlvm(), access_kind);
-    } else {
-        return self.loadTruncate(access_kind, elem_ty, ptr, elem_align.toLlvm());
-    }
+    return self.load(ptr, elem_ty, elem_align.toLlvm(), access_kind);
 }
 
 fn airSliceElemPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
@@ -2153,12 +2183,7 @@ fn airArrayElemVal(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder
     const elem_ty = array_ty.childType(zcu);
     if (isByRef(array_ty, zcu)) {
         const elem_ptr = try self.ptraddScaled(array_llvm_val, rhs, elem_ty.abiSize(zcu));
-        if (isByRef(elem_ty, zcu)) {
-            const elem_align = elem_ty.abiAlignment(zcu).toLlvm();
-            return self.loadByRef(elem_ptr, elem_ty, elem_align, .normal);
-        } else {
-            return self.loadTruncate(.normal, elem_ty, elem_ptr, .default);
-        }
+        return self.load(elem_ptr, elem_ty, elem_ty.abiAlignment(zcu).toLlvm(), .normal);
     }
 
     // This branch can be reached for vectors, which are always by-value.
@@ -2277,11 +2302,7 @@ fn airStructFieldVal(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Build
         else => struct_ptr_align.minStrict(.fromLog2Units(@ctz(offset))),
     };
 
-    if (isByRef(field_ty, zcu)) {
-        return self.loadByRef(field_ptr, field_ty, field_ptr_align.toLlvm(), .normal);
-    } else {
-        return self.loadTruncate(.normal, field_ty, field_ptr, field_ptr_align.toLlvm());
-    }
+    return self.load(field_ptr, field_ty, field_ptr_align.toLlvm(), .normal);
 }
 
 fn airFieldParentPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
@@ -3259,6 +3280,7 @@ fn airUnwrapRestricted(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocat
     const target = zcu.getTarget();
     const ty_op = fg.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const unrestricted_ty = ty_op.ty.toType();
+    const unrestricted_align = unrestricted_ty.abiAlignment(zcu);
     const restricted_ty = fg.typeOf(ty_op.operand);
     const operand = try fg.resolveInst(ty_op.operand);
     const restricted_decls = try o.getRestrictedDecls(restricted_ty);
@@ -3281,7 +3303,13 @@ fn airUnwrapRestricted(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocat
         fg.wip.cursor = .{ .block = valid_block };
     }
     const ptr = try fg.ptraddScaled(restricted_decls.array.toValue(&o.builder), operand, unrestricted_ty.abiSize(zcu));
-    return fg.load(ptr, unrestricted_ty, unrestricted_ty.abiAlignment(zcu).toLlvm(), .normal);
+    if (isByRef(unrestricted_ty, zcu)) return fg.loadByRef(ptr, unrestricted_ty, unrestricted_align.toLlvm(), .normal);
+    return fg.wip.loadMetadata(.normal, try o.lowerType(unrestricted_ty), ptr, unrestricted_align.toLlvm(), .{
+        .range = if (unrestricted_ty.isAbiInt(zcu)) range: {
+            if (restricted_decls.metadata.is_none) restricted_decls.metadata = .wrap(try o.builder.metadataForwardReference());
+            break :range restricted_decls.metadata;
+        } else .none,
+    }, "");
 }
 
 fn airWasmMemorySize(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
@@ -6042,8 +6070,27 @@ fn airUnionInit(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Va
     }
 
     if (layout.tag_size != 0) {
-        const loaded_enum = ip.loadEnumType(union_obj.enum_tag_type);
-        const llvm_tag_val = switch (loaded_enum.field_values.getOrNone(ip, extra.field_index)) {
+        const tag_ty: Type = .fromInterned(union_obj.enum_tag_type);
+        const llvm_tag_val = if (tag_ty.unrestrictedType(zcu)) |unrestricted_tag_ty| llvm_tag_val: {
+            const restricted_decls = try o.getRestrictedDecls(tag_ty);
+            const unrestricted_tag_val = try self.pt.enumValueFieldIndex(unrestricted_tag_ty, extra.field_index);
+            const tag_val = try self.pt.intern(.{ .restricted_value = .{
+                .ty = union_obj.enum_tag_type,
+                .unrestricted_value = unrestricted_tag_val.toIntern(),
+            } });
+            const gop = try restricted_decls.values.getOrPut(o.gpa, tag_val);
+            if (!gop.found_existing) gop.value_ptr.* = try o.lowerValue(unrestricted_tag_val.toIntern());
+            if (restricted_decls.enum_seen.len > 0) enum_seen: {
+                const tag_index = unrestricted_tag_ty.enumTagFieldIndex(unrestricted_tag_val, zcu) orelse break :enum_seen;
+                _ = try self.wip.store(
+                    .normal,
+                    .true,
+                    restricted_decls.enum_seen[tag_index].toValue(&o.builder),
+                    InternPool.Alignment.@"1".toLlvm(),
+                );
+            }
+            break :llvm_tag_val try o.builder.intConst(.i32, gop.index);
+        } else switch (ip.loadEnumType(union_obj.enum_tag_type).field_values.getOrNone(ip, extra.field_index)) {
             .none => try o.builder.intConst(
                 try o.lowerType(.fromInterned(union_obj.enum_tag_type)),
                 extra.field_index, // auto-numbered

@@ -10053,6 +10053,7 @@ fn analyzeSwitchBlock(
 ) CompileError!?Air.Inst.Ref {
     const pt = sema.pt;
     const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
     const gpa = sema.gpa;
 
     const src_node_offset = zir_switch.switch_src_node_offset;
@@ -10076,7 +10077,13 @@ fn analyzeSwitchBlock(
                 operand_ty.containerLayout(zcu) != .@"packed")
             {
                 const tag_val = try sema.unionToTag(block, val);
-                break :init .{ tag_val, sema.typeOf(tag_val) };
+                const tag_ty = sema.typeOf(tag_val);
+                const unrestricted_tag_ty = tag_ty.unrestrictedType(zcu) orelse tag_ty;
+                const unrestricted_tag_val = if (unrestricted_tag_ty.toIntern() != tag_ty.toIntern())
+                    try sema.unwrapRestricted(block, unrestricted_tag_ty, tag_val, src)
+                else
+                    tag_val;
+                break :init .{ unrestricted_tag_val, unrestricted_tag_ty };
             }
             break :init .{
                 if (maybe_operand_opv) |operand_opv| .fromValue(operand_opv) else val,
@@ -10269,7 +10276,7 @@ fn analyzeSwitchBlock(
                             break :item_val item_opv;
                         }
                         if (maybe_operand_opv) |operand_opv| {
-                            break :item_val .fromInterned(zcu.intern_pool.indexToKey(operand_opv.toIntern()).un.val);
+                            break :item_val .fromInterned(ip.indexToKey(operand_opv.toIntern()).un.val);
                         }
                         assert(zir_switch.any_maybe_runtime_capture); // there's a payload capture
                         const operand_val, const operand_ref = switch (operand) {
@@ -11211,7 +11218,8 @@ fn validateSwitchBlock(
                 const union_obj = ip.loadUnionType(operand_ty.toIntern());
                 switch (union_obj.tag_usage) {
                     .tagged => {
-                        break :item_ty .fromInterned(union_obj.enum_tag_type);
+                        const enum_tag_ty: Type = .fromInterned(union_obj.enum_tag_type);
+                        break :item_ty enum_tag_ty.unrestrictedType(zcu) orelse enum_tag_ty;
                     },
                     .none => {
                         if (union_obj.layout == .@"packed") {
@@ -16636,7 +16644,8 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             const union_field_ty = try sema.getBuiltinType(src, .@"Type.UnionField");
 
             const union_obj = ip.loadUnionType(unrestricted_ty.toIntern());
-            const enum_obj = ip.loadEnumType(union_obj.enum_tag_type);
+            const enum_tag_ty: Type = .fromInterned(union_obj.enum_tag_type);
+            const enum_obj = ip.loadEnumType((enum_tag_ty.unrestrictedType(zcu) orelse enum_tag_ty).toIntern());
             const layout = union_obj.layout;
 
             const union_field_vals = try gpa.alloc(InternPool.Index, enum_obj.field_names.len);
@@ -18220,7 +18229,7 @@ fn zirPtrType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
         break :blk ty;
     };
 
-    if (elem_ty.zigTypeTag(zcu) == .noreturn)
+    if (elem_ty.toIntern() == .noreturn_type)
         return sema.fail(block, elem_ty_src, "pointer to noreturn not allowed", .{});
 
     const target = zcu.getTarget();
@@ -18253,7 +18262,7 @@ fn zirPtrType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
         const ref: Zir.Inst.Ref = @enumFromInt(sema.code.extra[extra_i]);
         extra_i += 1;
         break :blk try sema.resolveAddressSpace(block, addrspace_src, ref, .pointer);
-    } else if (elem_ty.zigTypeTag(zcu) == .@"fn" and target.cpu.arch == .avr) .flash else .generic;
+    } else if (target.cpu.arch == .avr and ip.isFunctionType(elem_ty.toIntern())) .flash else .generic;
 
     const bit_offset: u16 = if (inst_data.flags.has_bit_range) blk: {
         const ref: Zir.Inst.Ref = @enumFromInt(sema.code.extra[extra_i]);
@@ -18284,7 +18293,7 @@ fn zirPtrType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
         }
     }
 
-    if (elem_ty.zigTypeTag(zcu) == .@"fn") {
+    if (ip.isFunctionType(elem_ty.toIntern())) {
         if (inst_data.size != .one) {
             return sema.fail(block, elem_ty_src, "function pointers must be single pointers", .{});
         }
@@ -18594,7 +18603,8 @@ fn zirStructInit(
         );
         const field_index = try sema.unionFieldIndex(block, resolved_ty, field_name, field_src);
         const tag_ty = resolved_ty.unionTagTypeHypothetical(zcu);
-        const tag_val = try pt.enumValueFieldIndex(tag_ty, field_index);
+        const unrestricted_tag_ty = tag_ty.unrestrictedType(zcu) orelse tag_ty;
+        const tag_val = try pt.enumValueFieldIndex(unrestricted_tag_ty, field_index);
         const field_ty: Type = .fromInterned(zcu.typeToUnion(resolved_ty).?.field_types.get(ip)[field_index]);
 
         if (field_ty.classify(zcu) == .no_possible_value) {
@@ -18626,7 +18636,10 @@ fn zirStructInit(
         if (sema.resolveValue(init_inst)) |val| {
             const struct_val = Value.fromInterned(try pt.internUnion(.{
                 .ty = resolved_ty.toIntern(),
-                .tag = tag_val.toIntern(),
+                .tag = if (unrestricted_tag_ty.toIntern() != tag_ty.toIntern())
+                    try pt.intern(.{ .restricted_value = .{ .ty = tag_ty.toIntern(), .unrestricted_value = tag_val.toIntern() } })
+                else
+                    tag_val.toIntern(),
                 .val = val.toIntern(),
             }));
             const final_val_inst = try sema.coerce(block, result_ty, Air.internedToRef(struct_val.toIntern()), src);
@@ -19358,7 +19371,8 @@ fn fieldType(
             },
             .@"union" => {
                 const union_obj = zcu.typeToUnion(cur_ty).?;
-                const enum_obj = ip.loadEnumType(union_obj.enum_tag_type);
+                const enum_tag_ty: Type = .fromInterned(union_obj.enum_tag_type);
+                const enum_obj = ip.loadEnumType((enum_tag_ty.unrestrictedType(zcu) orelse enum_tag_ty).toIntern());
                 const field_index = enum_obj.nameIndex(ip, field_name) orelse
                     return sema.failWithBadUnionFieldAccess(block, cur_ty, union_obj, field_src, field_name);
                 const field_ty = union_obj.field_types.get(ip)[field_index];
@@ -26604,6 +26618,7 @@ fn unionFieldPtr(
 
     const union_obj = zcu.typeToUnion(union_ty).?;
     const tag_ty: Type = .fromInterned(union_obj.enum_tag_type);
+    const unrestricted_tag_ty = tag_ty.unrestrictedType(zcu) orelse tag_ty;
 
     const field_index = try sema.unionFieldIndex(block, union_ty, field_name, field_name_src);
     const field_ty: Type = .fromInterned(union_obj.field_types.get(ip)[field_index]);
@@ -26630,17 +26645,17 @@ fn unionFieldPtr(
                     break :ct;
                 }
                 // Store to the union to initialize the tag.
-                const field_tag = try pt.enumValueFieldIndex(tag_ty, field_index);
+                const field_tag = try pt.enumValueFieldIndex(unrestricted_tag_ty, field_index);
                 const payload_val = try field_ty.onePossibleValue(pt) orelse try pt.undefValue(field_ty);
                 const new_union_val = try pt.unionValue(union_ty, field_tag, payload_val);
                 try sema.storePtrVal(block, src, union_ptr_val, new_union_val, union_ty);
             } else {
                 const union_val = try sema.pointerDeref(block, src, union_ptr_val, union_ptr_val.typeOf(zcu)) orelse break :ct;
                 if (union_val.isUndef(zcu)) return sema.failWithUseOfUndef(block, src, null);
-                const active_index = tag_ty.enumTagFieldIndex(union_val.unionTag(zcu).?, zcu).?;
+                const active_index = unrestricted_tag_ty.enumTagFieldIndex(union_val.unionTag(zcu).?, zcu).?;
                 if (active_index != field_index) {
                     const msg = msg: {
-                        const active_field_name = tag_ty.enumFieldName(active_index, zcu);
+                        const active_field_name = unrestricted_tag_ty.enumFieldName(active_index, zcu);
                         const msg = try sema.errMsg(src, "access of union field '{f}' while field '{f}' is active", .{
                             field_name.fmt(ip),
                             active_field_name.fmt(ip),
@@ -26660,19 +26675,26 @@ fn unionFieldPtr(
     // If the union has a tag, we must either set or or safety check it depending on `initializing`.
     tag: {
         if (union_ty.containerLayout(zcu) != .auto) break :tag;
-        if (tag_ty.classify(zcu) == .one_possible_value) break :tag;
+        if (unrestricted_tag_ty.classify(zcu) == .one_possible_value) break :tag;
         // There is a hypothetical non-trivial tag. We must set it even if not there at runtime, but
         // only emit a safety check if it's available at runtime (i.e. it's safety-tagged).
-        const want_tag = try pt.enumValueFieldIndex(tag_ty, field_index);
+        const want_tag = try pt.enumValueFieldIndex(unrestricted_tag_ty, field_index);
         if (initializing) {
-            const set_tag_inst = try block.addBinOp(.set_union_tag, union_ptr, .fromValue(want_tag));
+            const set_tag_inst = try block.addBinOp(.set_union_tag, union_ptr, if (unrestricted_tag_ty.toIntern() != tag_ty.toIntern())
+                .fromIntern(try pt.intern(.{ .restricted_value = .{ .ty = tag_ty.toIntern(), .unrestricted_value = want_tag.toIntern() } }))
+            else
+                .fromValue(want_tag));
             try sema.checkComptimeKnownStore(block, set_tag_inst, .unneeded); // `unneeded` since this isn't a "proper" store
         } else if (block.wantSafety() and union_obj.has_runtime_tag) {
             // The tag exists at runtime (actual or safety tag), so emit a safety check.
             // TODO would it be better if get_union_tag supported pointers to unions?
             const union_val = try block.addTyOp(.load, union_ty, union_ptr);
             const active_tag = try block.addTyOp(.get_union_tag, tag_ty, union_val);
-            try sema.addSafetyCheckInactiveUnionField(block, src, active_tag, .fromValue(want_tag));
+            const unrestricted_active_tag = if (unrestricted_tag_ty.toIntern() != tag_ty.toIntern())
+                try sema.unwrapRestricted(block, unrestricted_tag_ty, active_tag, src)
+            else
+                active_tag;
+            try sema.addSafetyCheckInactiveUnionField(block, src, unrestricted_active_tag, .fromValue(want_tag));
         }
     }
     if (field_ty.classify(zcu) == .no_possible_value) {
@@ -33539,7 +33561,8 @@ fn unionFieldIndex(
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const union_obj = zcu.typeToUnion(union_ty).?;
-    const enum_obj = ip.loadEnumType(union_obj.enum_tag_type);
+    const enum_tag_ty: Type = .fromInterned(union_obj.enum_tag_type);
+    const enum_obj = ip.loadEnumType((enum_tag_ty.unrestrictedType(zcu) orelse enum_tag_ty).toIntern());
     const field_index = enum_obj.nameIndex(ip, field_name) orelse
         return sema.failWithBadUnionFieldAccess(block, union_ty, union_obj, field_src, field_name);
     return @intCast(field_index);

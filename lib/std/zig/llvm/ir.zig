@@ -79,7 +79,7 @@ pub const FixedMetadataKind = enum(u6) {
     //tbaa = 1,
     prof = 2,
     //fpmath = 3,
-    //range = 4,
+    range = 4,
     //@"tbaa.struct" = 5,
     //@"invariant.load" = 6,
     //@"alias.scope" = 7,
@@ -98,7 +98,7 @@ pub const FixedMetadataKind = enum(u6) {
     //section_prefix = 20,
     //absolute_symbol = 21,
     //associated = 22,
-    //callees = 23,
+    callees = 23,
     //irr_loop = 24,
     //@"llvm.access.group" = 25,
     //callback = 26,
@@ -1232,7 +1232,7 @@ pub const ModuleBlock = struct {
             ty: Builder.Type,
             alignment: std.meta.Int(.unsigned, @bitSizeOf(Builder.Alignment)),
             is_volatile: bool,
-            success_ordering: Builder.AtomicOrdering,
+            ordering: Builder.AtomicOrdering,
             sync_scope: Builder.SyncScope,
         };
 
@@ -1264,7 +1264,7 @@ pub const ModuleBlock = struct {
             val: u32,
             alignment: std.meta.Int(.unsigned, @bitSizeOf(Builder.Alignment)),
             is_volatile: bool,
-            success_ordering: Builder.AtomicOrdering,
+            ordering: Builder.AtomicOrdering,
             sync_scope: Builder.SyncScope,
         };
 
@@ -1315,7 +1315,7 @@ pub const ModuleBlock = struct {
             val: u32,
             operation: Builder.Function.Instruction.AtomicRmw.Operation,
             is_volatile: bool,
-            success_ordering: Builder.AtomicOrdering,
+            ordering: Builder.AtomicOrdering,
             sync_scope: Builder.SyncScope,
             alignment: std.meta.Int(.unsigned, @bitSizeOf(Builder.Alignment)),
         };

@@ -3241,7 +3241,7 @@ pub fn validateExtern(ty: Type, position: ExternPosition, zcu: *const Zcu) bool 
         .pointer => {
             if (ty.isSlice(zcu)) return false;
             const child_ty = ty.childType(zcu);
-            if (child_ty.zigTypeTag(zcu) == .@"fn") {
+            if (zcu.intern_pool.isFunctionType(child_ty.toIntern())) {
                 return ty.isConstPtr(zcu) and validateExternCallconv(child_ty.fnCallingConvention(zcu));
             }
             return true;

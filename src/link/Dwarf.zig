@@ -4046,7 +4046,8 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                     const union_layout = Type.getUnionLayout(loaded_union, zcu);
                     try diw.writeUleb128(union_layout.abi_size);
                     try diw.writeUleb128(union_layout.abi_align.toByteUnits().?);
-                    const loaded_tag = ip.loadEnumType(loaded_union.enum_tag_type);
+                    const enum_tag_ty: Type = .fromInterned(loaded_union.enum_tag_type);
+                    const loaded_tag = ip.loadEnumType((enum_tag_ty.unrestrictedType(zcu) orelse enum_tag_ty).toIntern());
                     if (loaded_union.has_runtime_tag) {
                         try wip_nav.abbrevCode(.tagged_union);
                         try wip_nav.infoSectionOffset(
