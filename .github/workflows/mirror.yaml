@@ -1,4 +1,4 @@
-name: "Zig codeberg mirror"
+name: "Zig Сodeberg mirror"
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
       - name: "Mirror repository"
         working-directory: upstream.git
         env:
-          PUSH_TOKEN: ${{ secrets.MIRROR_PAT || secrets.GITHUB_TOKEN }}
+          PUSH_TOKEN: ${{ secrets.MIRROR_PAT }}
         run: |
           set -euo pipefail
 
