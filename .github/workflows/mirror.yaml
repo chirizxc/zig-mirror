@@ -1,10 +1,6 @@
 name: "Zig Сodeberg mirror"
 
 on:
-  push:
-    branches:
-      - mirror-workflow
-
   schedule:
     - cron: "0 * * * *"
 
@@ -40,5 +36,4 @@ jobs:
           url="https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           git push --force "$url" 'refs/heads/*:refs/heads/*'
-
           git push --force "$url" 'refs/tags/*:refs/tags/*'
