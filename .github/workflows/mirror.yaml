@@ -1,6 +1,10 @@
 name: "Zig Сodeberg mirror"
 
 on:
+  push:
+    branches:
+      - mirror-workflow
+
   schedule:
     - cron: "0 * * * *"
 
