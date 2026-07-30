@@ -236,10 +236,10 @@ const Node = union(enum) {
     lazy_const_data: LazyMapRef.Index(.const_data),
 
     value_debug_info: link.ConstPool.Index,
-    global_debug_info: Dwarf.GlobalIndex,
-    func_frame: Dwarf.FuncIndex,
-    func_debug_info: Dwarf.FuncIndex,
-    func_debug_line: Dwarf.FuncIndex,
+    global_debug_info: Dwarf.Global.Index,
+    func_frame: Dwarf.Func.Index,
+    func_debug_info: Dwarf.Func.Index,
+    func_debug_line: Dwarf.Func.Index,
 
     pub const InputIndex = enum(u32) {
         _,
@@ -7553,7 +7553,7 @@ fn updateFuncInner(
                 .debug_info_ni = .none,
                 .debug_line_ni = .none,
             };
-            const dwarf_func_index: Dwarf.FuncIndex = @fromBackingInt(@intCast(func_gop.index));
+            const dwarf_func_index: Dwarf.Func.Index = @fromBackingInt(@intCast(func_gop.index));
 
             debug.wip_nav = .{
                 .dwarf = dwarf,
