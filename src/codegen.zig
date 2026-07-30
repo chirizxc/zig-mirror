@@ -25,6 +25,7 @@ const dev = @import("dev.zig");
 pub const aarch64 = @import("codegen/aarch64.zig");
 
 pub const Error = link.Error;
+pub const EmitError = Error || std.Io.Writer.Error || error{MappedFileIo};
 
 fn devFeatureForBackend(backend: std.lang.CompilerBackend) dev.Feature {
     return switch (backend) {
@@ -181,7 +182,7 @@ pub fn emitFunction(
     any_mir: *const AnyMir,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) (Error || std.Io.Writer.Error)!void {
+) EmitError!void {
     const zcu = pt.zcu;
     const func = zcu.funcInfo(func_index);
     const target = &zcu.navFileScope(func.owner_nav).mod.?.resolved_target.result;
@@ -212,7 +213,7 @@ pub fn generateLazyFunction(
     atom_id: link.File.AtomId,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) (Error || std.Io.Writer.Error)!void {
+) EmitError!void {
     const zcu = pt.zcu;
     const target = if (Type.fromInterned(lazy_sym.ty).typeDeclInstAllowGeneratedTag(zcu)) |inst_index|
         &zcu.fileByIndex(inst_index.resolveFile(&zcu.intern_pool)).mod.?.resolved_target.result
@@ -236,7 +237,7 @@ pub fn generateLazySymbol(
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
     reloc_parent: link.File.RelocInfo.Parent,
-) (Error || std.Io.Writer.Error)!void {
+) EmitError!void {
     const tracy = trace(@src());
     defer tracy.end();
     tracy.addTextFmt("{t}, {f}", .{ lazy_sym.kind, Type.fromInterned(lazy_sym.ty).fmt(pt) });

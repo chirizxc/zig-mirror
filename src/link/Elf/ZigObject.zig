@@ -946,14 +946,11 @@ pub fn getNavVAddr(
                 .r_addend = reloc_info.addend,
             }, self);
         },
-        .debug_output => |debug_output| switch (debug_output) {
-            .dwarf => |wip_nav| try wip_nav.infoExternalReloc(.{
-                .source_off = @intCast(reloc_info.offset),
-                .target_sym = @fromBackingInt(@intCast(this_sym_index)),
-                .target_off = reloc_info.addend,
-            }),
-            .none => unreachable,
-        },
+        .debug_output => |debug_output| try debug_output.dwarf.infoExternalReloc(.{
+            .source_off = @intCast(reloc_info.offset),
+            .target_sym = @fromBackingInt(@intCast(this_sym_index)),
+            .target_off = reloc_info.addend,
+        }),
     }
     return @intCast(vaddr);
 }
@@ -978,14 +975,11 @@ pub fn getUavVAddr(
                 .r_addend = reloc_info.addend,
             }, self);
         },
-        .debug_output => |debug_output| switch (debug_output) {
-            .dwarf => |wip_nav| try wip_nav.infoExternalReloc(.{
-                .source_off = @intCast(reloc_info.offset),
-                .target_sym = @fromBackingInt(@intCast(sym_index)),
-                .target_off = reloc_info.addend,
-            }),
-            .none => unreachable,
-        },
+        .debug_output => |debug_output| try debug_output.dwarf.infoExternalReloc(.{
+            .source_off = @intCast(reloc_info.offset),
+            .target_sym = @fromBackingInt(@intCast(sym_index)),
+            .target_off = reloc_info.addend,
+        }),
     }
     return @intCast(vaddr);
 }
@@ -1555,6 +1549,7 @@ pub fn updateFunc(
         if (debug_wip_nav) |*dn| .{ .dwarf = dn } else .none,
     ) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
+        error.MappedFileIo => unreachable, // MappedFile is not being used
         else => |e| return e,
     };
     const code = aw.written();

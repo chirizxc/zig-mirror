@@ -1626,12 +1626,12 @@ pub const WipNav = struct {
         wip_nav.any_children = true;
     }
 
-    pub fn advancePCAndLine(wip_nav: *WipNav, delta_line: i33, delta_pc: u64) Allocator.Error!void {
-        return wip_nav.advancePCAndLineWriterError(delta_line, delta_pc) catch |err| switch (err) {
+    pub fn advancePcAndLine(wip_nav: *WipNav, delta_line: i33, delta_pc: u64) Allocator.Error!void {
+        return wip_nav.advancePcAndLineWriterError(delta_line, delta_pc) catch |err| switch (err) {
             error.WriteFailed => error.OutOfMemory,
         };
     }
-    fn advancePCAndLineWriterError(
+    fn advancePcAndLineWriterError(
         wip_nav: *WipNav,
         delta_line: i33,
         delta_pc: u64,
@@ -2105,20 +2105,20 @@ pub const WipNav = struct {
         const size = ty.abiSize(wip_nav.pt.zcu);
         try diw.writeUleb128(size);
         if (size == 0) return;
-        const old_end = wip_nav.debug_info.writer.end;
+        const old_end = diw.end;
         try codegen.generateSymbol(
             wip_nav.dwarf.bin_file,
             wip_nav.pt,
             val,
-            &wip_nav.debug_info.writer,
+            diw,
             .{ .debug_output = .{ .dwarf = wip_nav } },
         );
-        if (old_end + size != wip_nav.debug_info.writer.end) {
+        if (old_end + size != diw.end) {
             std.debug.print("{f} [{}]: {} != {}\n", .{
                 ty.fmt(wip_nav.pt),
                 ty.toIntern(),
                 size,
-                wip_nav.debug_info.writer.end - old_end,
+                diw.end - old_end,
             });
             unreachable;
         }
@@ -2278,10 +2278,9 @@ fn padToIdeal(actual_size: anytype) @TypeOf(actual_size) {
 
 pub fn init(lf: *link.File, format: DW.Format) Dwarf {
     const comp = lf.comp;
-    const gpa = comp.gpa;
     const target = &comp.root_mod.resolved_target.result;
     return .{
-        .gpa = gpa,
+        .gpa = comp.gpa,
         .bin_file = lf,
         .format = format,
         .address_size = switch (target.ptrBitWidth()) {
@@ -2774,7 +2773,7 @@ fn initWipNavInner(
                 try dlw.writeByte(DW.LNS.set_column);
                 try dlw.writeUleb128(func.lbrace_column + 1);
 
-                try wip_nav.advancePCAndLine(func.lbrace_line, 0);
+                try wip_nav.advancePcAndLine(func.lbrace_line, 0);
             } else {
                 try dlw.writeUleb128(1 + @backingInt(dwarf.address_size));
                 try dlw.writeByte(DW.LNE.set_address);
@@ -2791,7 +2790,7 @@ fn initWipNavInner(
                 try dlw.writeByte(DW.LNS.set_column);
                 try dlw.writeUleb128(func.lbrace_column + 1);
 
-                try wip_nav.advancePCAndLine(@intCast(decl.src_line + func.lbrace_line), 0);
+                try wip_nav.advancePcAndLine(@intCast(decl.src_line + func.lbrace_line), 0);
             }
         },
         else => {

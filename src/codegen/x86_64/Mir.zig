@@ -1978,7 +1978,7 @@ pub fn emit(
     atom_id: link.File.AtomId,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) codegen.Error!void {
+) codegen.EmitError!void {
     const zcu = pt.zcu;
     const comp = zcu.comp;
     const gpa = comp.gpa;
@@ -1986,7 +1986,7 @@ pub fn emit(
     const fn_info = zcu.typeToFunc(.fromInterned(func.ty)).?;
     const nav = func.owner_nav;
     const mod = zcu.navFileScope(nav).mod.?;
-    var e: Emit = .{
+    var em: Emit = .{
         .lower = .{
             .target = &mod.resolved_target.result,
             .allocator = gpa,
@@ -2006,7 +2006,8 @@ pub fn emit(
             .column = func.lbrace_column,
             .is_stmt = switch (debug_output) {
                 .dwarf => |dwarf| dwarf.dwarf.debug_line.header.default_is_stmt,
-                .none => undefined,
+                .dwarf2 => |dwarf| dwarf.wip_nav.dwarf.debug_line.header.default_is_stmt,
+                .eh_frame, .none => undefined,
             },
         },
         .prev_di_pc = 0,
@@ -2015,11 +2016,12 @@ pub fn emit(
         .relocs = .empty,
         .table_relocs = .empty,
     };
-    defer e.deinit();
-    e.emitMir() catch |err| switch (err) {
-        error.LowerFail, error.EmitFail => return zcu.codegenFailMsg(nav, e.lower.err_msg.?),
+    defer em.deinit();
+    em.emitMir() catch |err| switch (err) {
+        error.LowerFail, error.EmitFail => return zcu.codegenFailMsg(nav, em.lower.err_msg.?),
         error.InvalidInstruction, error.CannotEncode => return zcu.codegenFail(nav, "emit MIR failed: {s} (Zig compiler bug)", .{@errorName(err)}),
         else => return zcu.codegenFail(nav, "emit MIR failed: {s}", .{@errorName(err)}),
+        error.AlreadyReported, error.Canceled, error.MappedFileIo, error.WriteFailed => |e| return e,
     };
 }
 
@@ -2031,12 +2033,12 @@ pub fn emitLazy(
     atom_id: link.File.AtomId,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) codegen.Error!void {
+) codegen.EmitError!void {
     const zcu = pt.zcu;
     const comp = zcu.comp;
     const gpa = comp.gpa;
     const mod = comp.root_mod;
-    var e: Emit = .{
+    var em: Emit = .{
         .lower = .{
             .target = &mod.resolved_target.result,
             .allocator = gpa,
@@ -2058,11 +2060,12 @@ pub fn emitLazy(
         .relocs = .empty,
         .table_relocs = .empty,
     };
-    defer e.deinit();
-    e.emitMir() catch |err| switch (err) {
-        error.LowerFail, error.EmitFail => return zcu.codegenFailTypeMsg(lazy_sym.ty, e.lower.err_msg.?),
+    defer em.deinit();
+    em.emitMir() catch |err| switch (err) {
+        error.LowerFail, error.EmitFail => return zcu.codegenFailTypeMsg(lazy_sym.ty, em.lower.err_msg.?),
         error.InvalidInstruction, error.CannotEncode => return zcu.codegenFailType(lazy_sym.ty, "emit MIR failed: {s} (Zig compiler bug)", .{@errorName(err)}),
         else => return zcu.codegenFailType(lazy_sym.ty, "emit MIR failed: {s}", .{@errorName(err)}),
+        error.AlreadyReported, error.Canceled, error.MappedFileIo, error.WriteFailed => |e| return e,
     };
 }
 
