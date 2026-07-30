@@ -941,6 +941,7 @@ pub const WipNav = struct {
         }
         switch (wip_nav.frame_format) {
             .debug_frame => {
+                if (true) @panic("TODO");
                 try wip_nav.frameSectionOffset({}, 0);
                 try wip_nav.entry.cross_entry_relocs.append(wip_nav.dwarf.gpa, .{
                     .source_off = @intCast(dfw.end),
