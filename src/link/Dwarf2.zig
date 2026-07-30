@@ -9,14 +9,8 @@ units: std.array_hash_map.Auto(*Module, Unit),
 values: std.ArrayList(struct {
     debug_info_ni: MappedFile.Node.Index,
 }),
-globals: std.array_hash_map.Auto(InternPool.Nav.Index, struct {
-    debug_info_ni: MappedFile.Node.Index,
-}),
-funcs: std.array_hash_map.Auto(InternPool.Nav.Index, struct {
-    frame_ni: MappedFile.Node.Index,
-    debug_info_ni: MappedFile.Node.Index,
-    debug_line_ni: MappedFile.Node.Index,
-}),
+globals: std.array_hash_map.Auto(InternPool.Nav.Index, Global),
+funcs: std.array_hash_map.Auto(InternPool.Nav.Index, Func),
 
 frame: struct {
     header: Header,
@@ -67,9 +61,39 @@ pub const Unit = struct {
     };
 };
 
-pub const GlobalIndex = enum(u32) { _ };
+pub const Global = struct {
+    debug_info_ni: MappedFile.Node.Index,
 
-pub const FuncIndex = enum(u32) { _ };
+    pub const Index = enum(u32) {
+        _,
+
+        pub fn nav(gi: Global.Index, dwarf: *Dwarf) InternPool.Nav.Index {
+            return dwarf.globals.keys()[@backingInt(gi)];
+        }
+
+        pub fn get(gi: Global.Index, dwarf: *Dwarf) *Global {
+            return &dwarf.globals.values()[@backingInt(gi)];
+        }
+    };
+};
+
+pub const Func = struct {
+    frame_ni: MappedFile.Node.Index,
+    debug_info_ni: MappedFile.Node.Index,
+    debug_line_ni: MappedFile.Node.Index,
+
+    pub const Index = enum(u32) {
+        _,
+
+        pub fn nav(fi: Func.Index, dwarf: *Dwarf) InternPool.Nav.Index {
+            return dwarf.funcs.keys()[@backingInt(fi)];
+        }
+
+        pub fn get(fi: Func.Index, dwarf: *Dwarf) *Func {
+            return &dwarf.funcs.values()[@backingInt(fi)];
+        }
+    };
+};
 
 pub const SectionIndex = enum(u32) { none = std.math.maxInt(u32), _ };
 
