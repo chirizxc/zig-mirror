@@ -3,6 +3,8 @@ format: DW.Format,
 endian: std.lang.Endian,
 address_size: AddressSize,
 const_pool: link.ConstPool,
+
+units: std.array_hash_map.Auto(*Module, Unit),
 /// Indices are `link.ConstPool.Index`.
 values: std.ArrayList(struct {
     debug_info_ni: MappedFile.Node.Index,
@@ -47,6 +49,23 @@ debug_line: struct {
 pub const UpdateError = link.Error || error{MappedFileIo};
 
 pub const AddressSize = enum(u8) { @"32" = 4, @"64" = 8, _ };
+
+pub const Unit = struct {
+    frame_ni: MappedFile.Node.Index,
+    cie_ni: MappedFile.Node.Index,
+
+    pub const Index = enum(u32) {
+        _,
+
+        pub fn mod(ui: Unit.Index, dwarf: *Dwarf) *Module {
+            return dwarf.units.keys()[@backingInt(ui)];
+        }
+
+        pub fn get(ui: Unit.Index, dwarf: *Dwarf) *Unit {
+            return &dwarf.units.values()[@backingInt(ui)];
+        }
+    };
+};
 
 pub const GlobalIndex = enum(u32) { _ };
 
@@ -405,19 +424,20 @@ pub const Cfa = union(enum) {
 
 pub const WipNav = struct {
     dwarf: *Dwarf,
+    unit: Unit.Index,
     func: InternPool.Index,
+    func_sym_index: link.File.SymbolId,
     cfi: struct {
         loc: u32,
         cfa: Cfa.RegOff,
     },
-    frame_format: enum { none, debug_frame, eh_frame },
+    frame_format: enum { debug_frame, eh_frame },
     frame_writer: MappedFile.Node.Writer,
 
     pub const Debug = struct {
         wip_nav: WipNav,
         pt: Zcu.PerThread,
         any_children: bool,
-        func_sym_index: link.File.SymbolId,
         blocks: std.ArrayList(struct {
             abbrev_code: u32,
             low_pc_off: u64,
@@ -432,6 +452,10 @@ pub const WipNav = struct {
             debug.blocks.deinit(gpa);
             debug.wip_nav.deinit(gpa);
             debug.* = undefined;
+        }
+
+        pub fn genFuncHeaders(debug: *Debug) UpdateError!void {
+            try debug.wip_nav.genFuncHeaders();
         }
 
         pub fn genDebugFrame(debug: *Debug, loc: u32, cfa: Cfa) UpdateError!void {
@@ -585,9 +609,9 @@ pub const WipNav = struct {
             block.abbrev_code = @intCast(diw.end);
             try debug.abbrevCode(.block);
             block.low_pc_off = code_off;
-            try debug.infoAddrSym(debug.func_sym_index, code_off);
+            try debug.infoAddrSym(debug.wip_nav.func_sym_index, code_off);
             block.high_pc = @intCast(diw.end);
-            try diw.writeInt(u32, 0, dwarf.endian);
+            try diw.writeInt(u32, 0, .native);
             debug.any_children = false;
         }
 
@@ -648,9 +672,9 @@ pub const WipNav = struct {
             try diw.writeUleb128(zcu.navSrcLine(zcu.funcInfo(debug.wip_nav.func).owner_nav) + line + 1);
             try diw.writeUleb128(column + 1);
             block.low_pc_off = code_off;
-            try debug.infoAddrSym(debug.func_sym_index, code_off);
+            try debug.infoAddrSym(debug.wip_nav.func_sym_index, code_off);
             block.high_pc = @intCast(diw.end);
-            try diw.writeInt(u32, 0, dwarf.endian);
+            try diw.writeInt(u32, 0, .native);
             try debug.setInlineFunc(func);
             debug.any_children = false;
         }
@@ -875,6 +899,48 @@ pub const WipNav = struct {
         wip_nav.* = undefined;
     }
 
+    pub fn genFuncHeaders(wip_nav: *WipNav) UpdateError!void {
+        wip_nav.genDebugFrameHeader() catch |err| switch (err) {
+            error.WriteFailed => return wip_nav.frame_writer.err.?,
+            else => |e| return e,
+        };
+    }
+    fn genDebugFrameHeader(wip_nav: *WipNav) (UpdateError || Writer.Error)!void {
+        assert(wip_nav.func != .none);
+        const dfw = &wip_nav.frame_writer.interface;
+        switch (wip_nav.dwarf.format) {
+            .@"32" => try dfw.writeInt(u32, undefined, .native),
+            .@"64" => {
+                try dfw.writeInt(u32, std.math.maxInt(u32), .native);
+                try dfw.writeInt(u64, undefined, .native);
+            },
+        }
+        switch (wip_nav.frame_format) {
+            .debug_frame => {
+                try wip_nav.frameSectionOffset({}, 0);
+                try wip_nav.entry.cross_entry_relocs.append(wip_nav.dwarf.gpa, .{
+                    .source_off = @intCast(dfw.end),
+                });
+                try dfw.splatByteAll(0, switch (wip_nav.dwarf.format) {
+                    .@"32" => 4,
+                    .@"64" => 8,
+                });
+                try wip_nav.frameAddrSym(wip_nav.func_sym_index, 0);
+                try dfw.splatByteAll(undefined, @backingInt(wip_nav.dwarf.address_size));
+            },
+            .eh_frame => {
+                try dfw.writeInt(u32, undefined, .native);
+                try wip_nav.frameExternalReloc(.{
+                    .source_off = @intCast(dfw.end),
+                    .target_sym = wip_nav.func_sym_index,
+                });
+                try dfw.writeInt(u32, 0, .native);
+                try dfw.writeInt(u32, undefined, .native);
+                try dfw.writeUleb128(0);
+            },
+        }
+    }
+
     pub fn genDebugFrame(wip_nav: *WipNav, loc: u32, cfa: Cfa) UpdateError!void {
         return wip_nav.genDebugFrameInner(loc, cfa) catch |err| switch (err) {
             error.WriteFailed => wip_nav.frame_writer.err.?,
@@ -883,7 +949,6 @@ pub const WipNav = struct {
     }
     fn genDebugFrameInner(wip_nav: *WipNav, loc: u32, cfa: Cfa) (UpdateError || Writer.Error)!void {
         assert(wip_nav.func != .none);
-        if (wip_nav.frame_format == .none) return;
         const loc_cfa: Cfa = .{ .advance_loc = loc };
         try loc_cfa.write(wip_nav);
         try cfa.write(wip_nav);
@@ -1002,6 +1067,7 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
         },
         .endian = target.cpu.arch.endian(),
         .const_pool = .empty,
+        .units = .empty,
         .values = .empty,
         .globals = .empty,
         .funcs = .empty,
@@ -1055,6 +1121,7 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
 
 pub fn deinit(dwarf: *Dwarf, gpa: Allocator) void {
     dwarf.const_pool.deinit(gpa);
+    dwarf.units.deinit(gpa);
     dwarf.values.deinit(gpa);
     dwarf.globals.deinit(gpa);
     dwarf.funcs.deinit(gpa);
@@ -1065,6 +1132,17 @@ fn linkFile(dwarf: *Dwarf) *link.File {
     return switch (dwarf.tag) {
         else => unreachable,
         .elf2 => |tag| &@as(*tag.Type(), @fieldParentPtr("dwarf", dwarf)).base,
+    };
+}
+
+pub fn initUnits(dwarf: *Dwarf, zcu: *Zcu) Allocator.Error!void {
+    try dwarf.units.ensureTotalCapacity(zcu.gpa, zcu.module_roots.count());
+    for (zcu.module_roots.keys(), zcu.module_roots.values()) |mod, root| switch (root) {
+        .none => {},
+        else => dwarf.units.putAssumeCapacityNoClobber(mod, .{
+            .frame_ni = .none,
+            .cie_ni = .none,
+        }),
     };
 }
 
@@ -2338,6 +2416,7 @@ const Dwarf = @This();
 const InternPool = @import("../InternPool.zig");
 const link = @import("../link.zig");
 const MappedFile = @import("MappedFile.zig");
+const Module = @import("../Module.zig");
 const std = @import("std");
 const Type = @import("../Type.zig");
 const Value = @import("../Value.zig");
