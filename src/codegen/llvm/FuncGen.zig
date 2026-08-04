@@ -1071,7 +1071,7 @@ fn airRet(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!vo
     const val_is_undef = if (un_op.toInterned()) |i| Value.fromInterned(i).isUndef(zcu) else false;
     const ret_ty_align = ret_ty.abiAlignment(zcu);
 
-    if (val_is_undef and safety and !self.needMemsetWorkaround(ret_ty.abiSize(zcu))) {
+    if (val_is_undef and safety) {
         const rp = switch (self.ret_ptr) {
             .none => try self.buildZigAlloca(ret_ty, .none),
             else => |rp| rp,
@@ -5069,7 +5069,7 @@ fn airStore(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!Bu
     };
 
     const val_is_undef = if (bin_op.rhs.toInterned()) |i| Value.fromInterned(i).isUndef(zcu) else false;
-    if (val_is_undef and !fg.needMemsetWorkaround(elem_ty.abiSize(zcu))) {
+    if (val_is_undef) {
         const owner_mod = fg.ownerModule();
 
         // Even if safety is disabled, we still emit a memset to undefined since it conveys
@@ -5585,13 +5585,7 @@ fn airMemset(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error
 
     self.maybeMarkAllowZeroAccess(ptr_ty.ptrInfo(zcu));
 
-    const allow_byte_memset = !self.needMemsetWorkaround(switch (ptr_ty.ptrSize(zcu)) {
-        .one => ptr_ty.childType(zcu).abiSize(zcu),
-        .slice => null,
-        .many, .c => unreachable,
-    });
-
-    if (allow_byte_memset) if (bin_op.rhs.toInterned()) |elem_ip_index| {
+    if (bin_op.rhs.toInterned()) |elem_ip_index| {
         const elem_val: Value = .fromInterned(elem_ip_index);
         if (elem_val.isUndef(zcu)) {
             // Even if safety is disabled, we still emit a memset to undefined since it conveys
@@ -5634,13 +5628,12 @@ fn airMemset(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error
             );
             return .none;
         }
-    };
+    }
 
     const value = try self.resolveInst(bin_op.rhs);
     const elem_abi_size = elem_ty.abiSize(zcu);
 
     intrinsic: {
-        if (!allow_byte_memset) break :intrinsic;
         if (elem_abi_size != 1) break :intrinsic;
         // To use LLVM's intrinsic, we need to convert the operand to a raw 8-bit integer value.
         const fill_byte: Builder.Value = byte: {
@@ -8089,32 +8082,6 @@ fn llvmAllocaAddressSpace(target: *const std.Target) Builder.AddrSpace {
         .amdgcn => Builder.AddrSpace.amdgpu.private,
         else => .default,
     };
-}
-
-/// Due to an LLVM bug, calls to `@llvm.memset.inline.*` with large constant length arguments cause
-/// LLVM to crash. As a mitigation, this function returns `true` if we should avoid emitting a
-/// memset call of the given length.
-///
-/// Most of our call sites are just setting memory to `undefined`, so can simply skip the memset
-/// call if we return `true`.
-///
-/// Upstream issue: https://github.com/llvm/llvm-project/issues/189161
-/// Zig issue: https://codeberg.org/ziglang/zig/issues/31701
-fn needMemsetWorkaround(fg: *const FuncGen, maybe_len: ?u64) bool {
-    if (!fg.disable_intrinsics) {
-        // The bug is limited to `@llvm.memset.inline.*`: normal memset calls are fine.
-        return false;
-    }
-    const len = maybe_len orelse {
-        // We don't think the length is constant, but a trivial optimization on LLVM's side could
-        // turn it into one and potentially trigger the bug. Therefore, always apply the workaround
-        // if the length is not a known constant.
-        return true;
-    };
-    // Empirically, the crash first happens at 1048561 bytes, which is 1 MiB less 15 bytes. To be
-    // safe (just in case the limit is target-specific or something like that), let's just set the
-    // cap at half of that, i.e. 512 KiB.
-    return len > 1024 * 512;
 }
 
 const mips_clobber_overrides = std.StaticStringMap(enum {
