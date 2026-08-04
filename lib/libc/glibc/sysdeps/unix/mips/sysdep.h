@@ -37,8 +37,7 @@
 		.end	function;		        \
 		.size	function,.-function
 
-// zig patch: j <reg> -> jr <reg> for https://github.com/ziglang/zig/issues/21315
-#define ret	jr ra ; nop
+#define ret	j ra ; nop
 
 #undef PSEUDO_END
 #define PSEUDO_END(sym) cfi_endproc; .end sym; .size sym,.-sym
