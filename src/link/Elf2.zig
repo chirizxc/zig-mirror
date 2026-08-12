@@ -36,6 +36,7 @@ shndx: struct {
     dynsym: Section.Index,
     dynstr: Section.Index,
     dynamic: Section.Index,
+    hash: Section.Index,
     tdata: Section.Index,
     rela_dyn: Section.Index,
     rela_plt: Section.Index,
@@ -1751,6 +1752,150 @@ const SymbolReloc = struct {
     }
 };
 
+fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
+    const min_buckets = max_dynsym_count / 2;
+
+    const cur_dynsym_count: u32 = switch (elf.shdrPtr(elf.shndx.dynsym)) {
+        inline else => |shdr, class| @intCast(@divExact(
+            elf.targetLoad(&shdr.size),
+            @sizeOf(class.ElfN().Sym),
+        )),
+    };
+
+    {
+        const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+        const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
+        assert(elf.targetLoad(&header.nchain) == cur_dynsym_count);
+        const nbucket = elf.targetLoad(&header.nbucket);
+        if (nbucket >= min_buckets) {
+            // We don't need to add any buckets, but we still need to make sure the section is large
+            // enough to fit `max_dynsym_count` chains.
+            const need_size = @sizeOf(std.elf.hash.Header) + (nbucket + max_dynsym_count) * 4;
+            try elf.ensureNodeSize(elf.shndx.hash.get(elf).ni, need_size);
+            return;
+        }
+        // We need more buckets, so we'll have to rebuild the hash table.
+    }
+
+    // Rebuilding the hash table is quite expensive, so to avoid doing it too often we use a large
+    // growth factor (* 2) for `nbucket`.
+    const new_nbucket = min_buckets * 2;
+
+    {
+        const need_size = @sizeOf(std.elf.hash.Header) + (new_nbucket + max_dynsym_count) * 4;
+        try elf.ensureNodeSize(elf.shndx.hash.get(elf).ni, need_size);
+    }
+
+    elf.mf.nodes_lock.lock();
+    defer elf.mf.nodes_lock.unlock();
+
+    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
+    const trailing: []u32 = @ptrCast(section_slice[@sizeOf(std.elf.hash.Header)..]);
+
+    header.* = .{ .nbucket = new_nbucket, .nchain = cur_dynsym_count };
+    if (elf.targetEndian() != std.lang.Endian.native) {
+        std.mem.byteSwapAllFields(std.elf.hash.Header, header);
+    }
+    const buckets: []u32 = trailing[0..elf.targetLoad(&header.nbucket)];
+    const chains: []u32 = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+
+    @memset(buckets, 0);
+    chains[0] = 0;
+    for (1..cur_dynsym_count, chains[1..]) |dynsym_index_usize, *chain| {
+        const dynsym_index: u32 = @intCast(dynsym_index_usize);
+        const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+            inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
+        };
+        const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+        // Make this symbol the head of that bucket, and chain to the old head.
+        chain.* = buckets[b];
+        elf.targetStore(&buckets[b], dynsym_index);
+    }
+}
+
+fn appendDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
+    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
+    assert(elf.targetLoad(&header.nchain) == dynsym_index);
+    elf.targetStore(&header.nchain, dynsym_index + 1);
+
+    switch (elf.shdrPtr(elf.shndx.hash)) {
+        inline else => |shdr| elf.targetStore(&shdr.size, elf.targetLoad(&shdr.size) + 4),
+    }
+
+    elf.populateDynsymHashEntry(dynsym_index);
+}
+fn populateDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
+    elf.mf.nodes_lock.lock();
+    defer elf.mf.nodes_lock.unlock();
+
+    assert(dynsym_index != 0);
+
+    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
+    const trailing: []u32 = @ptrCast(section_slice[@sizeOf(std.elf.hash.Header)..]);
+
+    const buckets: []u32 = trailing[0..elf.targetLoad(&header.nbucket)];
+    const chains: []u32 = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+
+    const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+        inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
+    };
+    const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+    // Make this symbol the head of that bucket, and chain to the old head.
+    chains[dynsym_index] = buckets[b];
+    elf.targetStore(&buckets[b], dynsym_index);
+}
+fn popDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
+    elf.clearDynsymHashEntry(dynsym_index);
+
+    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
+    assert(elf.targetLoad(&header.nchain) == dynsym_index + 1);
+    elf.targetStore(&header.nchain, dynsym_index);
+
+    switch (elf.shdrPtr(elf.shndx.hash)) {
+        inline else => |shdr| elf.targetStore(&shdr.size, elf.targetLoad(&shdr.size) - 4),
+    }
+}
+fn clearDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
+    elf.mf.nodes_lock.lock();
+    defer elf.mf.nodes_lock.unlock();
+
+    assert(dynsym_index != 0);
+
+    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
+    const trailing: []u32 = @ptrCast(section_slice[@sizeOf(std.elf.hash.Header)..]);
+
+    const buckets: []u32 = trailing[0..elf.targetLoad(&header.nbucket)];
+    const chains: []u32 = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+
+    const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+        inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
+    };
+    const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+
+    const next_dynsym_index = elf.targetLoad(&chains[dynsym_index]);
+    elf.targetStore(&chains[dynsym_index], 0);
+
+    // To remove `dynsym_index` from the singly-linked list, we need to iterate the chain to find
+    // and replace it. But since this is, well, a hash table, that's actually fine.
+    if (elf.targetLoad(&buckets[b]) == dynsym_index) {
+        elf.targetStore(&buckets[b], next_dynsym_index);
+    } else {
+        var cur = elf.targetLoad(&buckets[b]);
+        while (true) {
+            assert(cur != 0); // `dynsym_index` is definitely somewhere in the chain
+            if (elf.targetLoad(&chains[cur]) == dynsym_index) break;
+            cur = elf.targetLoad(&chains[cur]);
+        }
+        // We found `dynsym_index`; replace it with `next_dynsym_index`.
+        elf.targetStore(&chains[cur], next_dynsym_index);
+    }
+}
+
 fn ensureUnusedSymbolCapacity(elf: *Elf, len: u32, kind: enum { all_local, maybe_global }) Error!void {
     const gpa = elf.base.comp.gpa;
 
@@ -1780,11 +1925,18 @@ fn ensureUnusedSymbolCapacity(elf: *Elf, len: u32, kind: enum { all_local, maybe
             try elf.node_global_symbols.ensureUnusedCapacity(gpa, len);
 
             if (elf.shndx.dynsym != .UNDEF) {
-                // Ensure the `.dynsym` section's node is big enough
-                const dynsym_need_size: u64 = switch (elf.shdrPtr(elf.shndx.dynsym)) {
-                    inline else => |shdr, class| elf.targetLoad(&shdr.size) + len * @sizeOf(class.ElfN().Sym),
+                const dynsym_cur_size: u64, const dynsym_ent_size: u32 = switch (elf.shdrPtr(elf.shndx.dynsym)) {
+                    inline else => |shdr, class| .{
+                        elf.targetLoad(&shdr.size),
+                        @sizeOf(class.ElfN().Sym),
+                    },
                 };
+                const dynsym_cur_len: u32 = @intCast(@divExact(dynsym_cur_size, dynsym_ent_size));
+
+                const dynsym_need_size: u64 = (dynsym_cur_len + len) * dynsym_ent_size;
                 try elf.ensureNodeSize(elf.shndx.dynsym.get(elf).ni, dynsym_need_size);
+
+                try elf.ensureDynsymHashCapacity(dynsym_cur_len + len);
 
                 try elf.ensureUnusedPltCapacity(len);
             }
@@ -2122,6 +2274,7 @@ fn addGlobalSymbolAssumeCapacity(elf: *Elf, opts: AddGlobalSymbolOptions) error{
                     if (elf.targetEndian() != native_endian) {
                         std.mem.byteSwapAllFields(Sym, sym);
                     }
+                    elf.appendDynsymHashEntry(dynsym_index);
                     break :dynsym_index dynsym_index;
                 },
             }
@@ -2396,12 +2549,16 @@ fn moveDemotedGlobal(elf: *Elf, global_ptr: *Symbol.Global) void {
                 const new_size = old_size - ent_size;
                 const remove_dynsym_index: u32 = @intCast(@divExact(new_size, ent_size));
 
+                elf.popDynsymHashEntry(remove_dynsym_index);
+
                 const free_dynsym_index = global_ptr.dynsym_index;
                 global_ptr.dynsym_index = 0;
 
                 if (free_dynsym_index != remove_dynsym_index) {
                     // The demoted global wasn't the last entry, so move whatever entry we just
                     // truncated out of dynsym into its place.
+
+                    elf.clearDynsymHashEntry(free_dynsym_index);
 
                     const src_dynsym_ptr = @field(elf.dynsymPtr(remove_dynsym_index), @tagName(class));
                     const dest_dynsym_ptr = @field(elf.dynsymPtr(free_dynsym_index), @tagName(class));
@@ -2414,6 +2571,8 @@ fn moveDemotedGlobal(elf: *Elf, global_ptr: *Symbol.Global) void {
 
                     assert(moved_global_ptr.dynsym_index == remove_dynsym_index);
                     moved_global_ptr.dynsym_index = free_dynsym_index;
+
+                    elf.populateDynsymHashEntry(free_dynsym_index);
 
                     // Since that symbol's dynsym index has changed, we'll have to update any
                     // relocation entries targeting it.
@@ -3161,6 +3320,7 @@ fn create(
             .dynsym = .UNDEF,
             .dynstr = .UNDEF,
             .dynamic = .UNDEF,
+            .hash = .UNDEF,
             .tdata = .UNDEF,
             .rela_dyn = .UNDEF,
             .rela_plt = .UNDEF,
@@ -3298,6 +3458,7 @@ fn initHeaders(
             shnum += 1; // .dynamic
             shnum += 1; // .dynstr
             shnum += 1; // .dynsym
+            shnum += 1; // .hash
             shnum += 1; // .rela.dyn
             shnum += 1; // .rela.plt
         }
@@ -3926,6 +4087,26 @@ fn initHeaders(
                 .entsize = @intCast(addr_align.toByteUnits() * 2),
                 .node_align = addr_align,
             });
+            elf.shndx.hash = try elf.addSection(elf.ni.rodata, .{
+                .name = ".hash",
+                .type = .HASH,
+                .flags = .{ .ALLOC = true },
+                .link = elf.shndx.dynsym.toSection().?,
+                .addralign = .@"4",
+                // initially: nbucket = 8, nchain = 1
+                .size = @sizeOf(std.elf.hash.Header) + (8 + 1) * 4,
+            });
+            {
+                const hash_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+                const header: *std.elf.hash.Header = @ptrCast(hash_slice[0..@sizeOf(std.elf.hash.Header)]);
+                header.* = .{ .nbucket = 8, .nchain = 1 };
+                if (elf.targetEndian() != std.lang.Endian.native) {
+                    std.mem.byteSwapAllFields(std.elf.hash.Header, header);
+                }
+                // The initial bucket and chain values are all 0, but `MappedFile` initialized the
+                // node with zeroes anyway, so no need to memset.
+            }
+
             switch (machine) {
                 .AARCH64, .PPC64, .RISCV => @panic(@tagName(machine)),
                 .X86_64 => {
@@ -5931,7 +6112,7 @@ fn prepareDynamic(elf: *Elf) Error!void {
         @as(usize, @intFromBool(elf.shndx.preinit_array != .UNDEF)) * 2 +
         @as(usize, @intFromBool(use_plt)) * 4 +
         @intFromBool(comp.config.output_mode == .Exe) +
-        @intFromBool(elf.textrel_count > 0) + 8;
+        @intFromBool(elf.textrel_count > 0) + 9;
 
     const dynamic_size = dynamic_len * 2 * elf.targetPtrSize();
 
@@ -6031,7 +6212,7 @@ fn flushDynamic(elf: *Elf) void {
                 dynamic_index += 4;
             }
 
-            dynamic_entries[dynamic_index..][0..8].* = .{
+            dynamic_entries[dynamic_index..][0..9].* = .{
                 .{ std.elf.DT_RELA, @intCast(elf.shndx.rela_dyn.vaddr(elf)) },
                 .{ std.elf.DT_RELASZ, @intCast(elf.shndx.rela_dyn.size(elf)) },
                 .{ std.elf.DT_RELAENT, @sizeOf(ElfN.Rela) },
@@ -6039,9 +6220,10 @@ fn flushDynamic(elf: *Elf) void {
                 .{ std.elf.DT_SYMENT, @sizeOf(ElfN.Sym) },
                 .{ std.elf.DT_STRTAB, @intCast(elf.shndx.dynstr.vaddr(elf)) },
                 .{ std.elf.DT_STRSZ, @intCast(elf.shndx.dynstr.size(elf)) },
+                .{ std.elf.DT_HASH, @intCast(elf.shndx.hash.vaddr(elf)) },
                 .{ std.elf.DT_NULL, 0 },
             };
-            dynamic_index += 8;
+            dynamic_index += 9;
 
             assert(dynamic_index == dynamic_entries.len);
             if (elf.targetEndian() != native_endian) for (dynamic_entries) |*dynamic_entry|
@@ -7821,6 +8003,7 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
                     .REL,
                     .RELA,
                     .DYNSYM,
+                    .HASH,
                     => return,
                 }
                 if (shndx != elf.shndx.plt and
