@@ -2270,8 +2270,9 @@ fn setGlobalSymbolValue(
     }
 
     // If this symbol was previously undefined, relocations targeting it may have been lowered to
-    // runtime relocations which we have now discovered we do not need, so delete those.
-    if (elf.shndx.dynamic != .UNDEF) {
+    // runtime relocations which we have now discovered we do not need, so delete those. This does
+    // not apply if the symbol is preemptible, which we check with `classifySymbolValue`.
+    if (elf.shndx.dynamic != .UNDEF and elf.classifySymbolValue(.global(global_name)) != .dynamic) {
         Symbol.Id.global(global_name).deleteDynamicTargetRelocs(elf);
     }
 
@@ -6925,16 +6926,15 @@ fn nodeWantsDsoRelocation(elf: *Elf, node: MappedFile.Node.Index) enum { yes, ye
 fn maybeAddCopyRelocation(elf: *Elf, global_name: String(.strtab)) Error!bool {
     assert(elf.shndx.dynamic != .UNDEF);
 
+    // Only dynamic executables may contain `R_*_COPY` relocations.
+    if (elf.base.comp.config.output_mode != .Exe) return false;
+
     const gpa = elf.base.comp.gpa;
 
     const global_ptr = elf.globals.strong_undef.getPtr(global_name) orelse
         elf.globals.weak_undef.getPtr(global_name).?;
 
     assert(global_ptr.dynsym_index != 0);
-
-    // Only dynamic executables may contain `R_*_COPY` relocations.
-    if (elf.shndx.dynamic == .UNDEF) return false;
-    if (elf.base.comp.config.output_mode != .Exe) return false;
 
     const dso_global = elf.dso_globals.get(global_name) orelse {
         // We do not have a definition to provide the correct size for the symbol. If a definition
