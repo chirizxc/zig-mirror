@@ -119,8 +119,6 @@ got: std.array_hash_map.Auto(GotKey, Section.RelaIndex.Optional),
 plt: std.array_hash_map.Auto(String(.strtab), void),
 /// The `.plt` section contains zero or more symbol relocations starting at this index.
 plt_first_symbol_reloc: SymbolReloc.Index,
-/// The `.dynamic` section contains zero or more symbol relocations starting at this index.
-dynamic_first_symbol_reloc: SymbolReloc.Index,
 
 needed: std.array_hash_map.Auto(String(.dynstr), void),
 inputs: std.ArrayList(struct {
@@ -195,8 +193,6 @@ const Node = union(enum) {
     shdr,
     segment: u32,
     /// The section '.plt' may contain relocations via `elf.plt_first_symbol_reloc`.
-    ///
-    /// The section '.dynamic' may contain relocations via `elf.dynamic_first_symbol_reloc`.
     section: Section.Index,
     /// Only valid for static libraries, represents one non-zcu archive member.
     input_member: InputIndex,
@@ -634,11 +630,6 @@ const Section = struct {
                         const old_size = elf.targetLoad(&shdr.size);
                         const new_size = old_size + ent_size;
                         elf.targetStore(&shdr.size, new_size);
-                        if (rela_shndx == elf.shndx.rela_dyn) {
-                            elf.updateDynamicEntry(std.elf.DT_RELASZ, new_size);
-                        } else if (rela_shndx == elf.shndx.rela_plt) {
-                            elf.updateDynamicEntry(std.elf.DT_PLTRELSZ, new_size);
-                        }
                         break :new_index @fromBackingInt(@intCast(@divExact(old_size, ent_size)));
                     };
                     const relas: []class.ElfN().Rela = @ptrCast(@alignCast(
@@ -3045,9 +3036,6 @@ const StringTable = struct {
                 break :size .{ old_size, new_size };
             },
         };
-        if (shndx == elf.shndx.dynstr) {
-            elf.updateDynamicEntry(std.elf.DT_STRSZ, new_size);
-        }
         try elf.ensureNodeSize(ni, new_size);
         const slice = ni.slice(&elf.mf)[old_size..];
         @memcpy(slice[0..key.len], key);
@@ -3202,7 +3190,6 @@ fn create(
         .got = .empty,
         .plt = .empty,
         .plt_first_symbol_reloc = .none,
-        .dynamic_first_symbol_reloc = .none,
         .needed = .empty,
         .inputs = .empty,
         .input_pending_index = 0,
@@ -5313,7 +5300,7 @@ fn loadObject(
                                     const old_size = elf.targetLoad(&shdr.size);
                                     const new_size = old_size + section.shdr.size;
                                     elf.targetStore(&shdr.size, @intCast(new_size));
-                                    elf.updateInitFiniArraySectionSize(shndx.*, init_fini_section_name, @"type", new_size);
+                                    elf.updateInitFiniArraySectionSize(shndx.*, init_fini_section_name);
                                 },
                             }
                             break :shndx shndx.*;
@@ -5878,19 +5865,7 @@ fn updateInitFiniArraySectionSize(
     elf: *Elf,
     shndx: Section.Index,
     comptime name: []const u8,
-    @"type": std.elf.SHT,
-    new_size: u64,
 ) void {
-    if (elf.shndx.dynamic != .UNDEF) {
-        const arraysz_dyn_key: u32 = switch (@"type") {
-            .INIT_ARRAY => std.elf.DT_INIT_ARRAYSZ,
-            .FINI_ARRAY => std.elf.DT_FINI_ARRAYSZ,
-            .PREINIT_ARRAY => std.elf.DT_PREINIT_ARRAYSZ,
-            else => unreachable,
-        };
-        elf.updateDynamicEntry(arraysz_dyn_key, new_size);
-    }
-
     const end_vaddr: u64 = switch (elf.shdrPtr(shndx)) {
         inline else => |shdr| shndx.vaddr(elf) + elf.targetLoad(&shdr.size),
     };
@@ -7648,8 +7623,6 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 elf.flushMovedPltSection(.got_plt, old_addr, addr);
             } else if (shndx == elf.shndx.plt_sec) {
                 elf.flushMovedPltSection(.plt_sec, old_addr, addr);
-            } else if (shndx == elf.shndx.dynamic) {
-                elf.flushMovedNodeRelocs(ni, addr, elf.dynamic_first_symbol_reloc, .none);
             }
         },
         .input_member => {},
@@ -7940,21 +7913,6 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
     }
 }
 
-fn updateDynamicEntry(elf: *Elf, key: u32, new_val: u64) void {
-    switch (elf.shdrPtr(elf.shndx.dynamic)) {
-        inline else => |shdr, class| {
-            const dynamic_size = elf.targetLoad(&shdr.size);
-            const dynamic_entries: [][2]class.ElfN().Addr = @ptrCast(@alignCast(
-                elf.shndx.dynamic.get(elf).ni.slice(&elf.mf)[0..@intCast(dynamic_size)],
-            ));
-            for (dynamic_entries) |*dynamic_entry| {
-                if (elf.targetLoad(&dynamic_entry[0]) == key) {
-                    elf.targetStore(&dynamic_entry[1], @intCast(new_val));
-                }
-            }
-        },
-    }
-}
 fn addPltEntry(elf: *Elf, global_name: String(.strtab), dynsym_index: u32) void {
     const target_endian = elf.targetEndian();
 
