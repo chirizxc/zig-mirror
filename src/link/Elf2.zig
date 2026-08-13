@@ -8267,9 +8267,9 @@ fn addPltEntry(elf: *Elf, global_name: String(.strtab), dynsym_index: u32) void 
                     const plt_slice: []Inst = @ptrCast(@alignCast(plt_ni.slice(&elf.mf)[@intCast(got_plt_offset)..][0..32]));
                     @memcpy(plt_slice, &[8]Inst{
                         // sethi (. - .plt[0]), %g1
-                        .{ .imm22 = .{ .imm = @truncate(got_plt_offset), .op = 0b0000000011 } },
+                        .{ .imm22 = .{ .imm = @truncate(got_plt_offset), .op = 0b0000001100 } },
                         // ba,a %xcc, .plt[1]
-                        .{ .disp19 = .{ .disp = @truncate((got_plt_offset + 4 - 32) >> 2), .op = 0b1100001101000 } },
+                        .{ .disp19 = .{ .disp = @truncate((got_plt_offset + 4 - 32) >> 2), .op = 0b0011000001101 } },
                         // nop
                         .{ .raw = 0x0100_0000 },
                         // nop
@@ -8283,6 +8283,9 @@ fn addPltEntry(elf: *Elf, global_name: String(.strtab), dynsym_index: u32) void 
                         // nop
                         .{ .raw = 0x0100_0000 },
                     });
+                    if (elf.targetEndian() != std.lang.Endian.native) {
+                        std.mem.byteSwapAllElements(Inst, plt_slice);
+                    }
                 },
             }
         },
@@ -8353,6 +8356,13 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
         .LOONGARCH => {
             switch (which) {
                 .plt => {
+                    // Re-apply all PLT relocations. If a symbol is in the PLT then the majority of
+                    // its relocations are probably going through the PLT, so we don't bother with
+                    // specific tracking for PLT relocations---instead just re-apply all relocations
+                    // targeting symbols with PLT entries.
+                    for (elf.plt.keys()) |name| {
+                        Symbol.Id.global(name).applyTargetRelocs(elf);
+                    }
                     // We also need to update all of the references from `.plt` to `.got.plt`.
                     // However, if there's also a flush pending for `.got.plt`, don't bother doing
                     // this now, because we'll do it when `.got.plt` is flushed anyway.
@@ -8413,6 +8423,13 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
         },
         .SPARCV9 => switch (which) {
             .plt => {
+                // Re-apply all PLT relocations. If a symbol is in the PLT then the majority of
+                // its relocations are probably going through the PLT, so we don't bother with
+                // specific tracking for PLT relocations---instead just re-apply all relocations
+                // targeting symbols with PLT entries.
+                for (elf.plt.keys()) |name| {
+                    Symbol.Id.global(name).applyTargetRelocs(elf);
+                }
                 // Update the offsets of the relocation entries in `.rela.plt`.
                 const rela_plt_shndx = elf.shndx.rela_plt;
                 for (0..elf.plt.count()) |plt_index| {
