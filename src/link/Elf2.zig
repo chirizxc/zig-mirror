@@ -135,6 +135,18 @@ inputs: std.ArrayList(struct {
 input_pending_index: u32,
 input_sections: std.ArrayList(InputSection),
 input_section_pending_index: u32,
+/// SPARC has some weird relocations which involve setting some bits to fixed constant values. When
+/// we encounter such a relocation, we queue the action here, and apply them during `idle`.
+one_shot_fixups: std.ArrayList(struct {
+    node: MappedFile.Node.Index,
+    offset: u64,
+    /// The syntax in these tag names matches the syntax used in `SymbolReloc.Type.Simple.dest`.
+    action: enum {
+        @"32[12:10] = 0b000",
+        @"32[12:10] = 0b111",
+        @"32[12:12] = 0b0",
+    },
+}),
 navs: std.array_hash_map.Auto(InternPool.Nav.Index, struct {
     lsi: Symbol.LocalIndex,
     /// The start index of the contiguous sequence of symbol relocations in this NAV.
@@ -3356,6 +3368,7 @@ fn create(
         .input_pending_index = 0,
         .input_sections = .empty,
         .input_section_pending_index = 0,
+        .one_shot_fixups = .empty,
         .navs = .empty,
         .uavs = .empty,
         .lazy = comptime .initFill(.{
@@ -3405,6 +3418,7 @@ pub fn deinit(elf: *Elf) void {
     for (elf.inputs.items) |input| if (input.member) |m| gpa.free(m);
     elf.inputs.deinit(gpa);
     elf.input_sections.deinit(gpa);
+    elf.one_shot_fixups.deinit(gpa);
     elf.navs.deinit(gpa);
     elf.uavs.deinit(gpa);
     for (&elf.lazy.values) |*lazy| lazy.map.deinit(gpa);
@@ -6615,36 +6629,36 @@ fn addRelocAssumeCapacity(
 
                 // The following relocations are all represented by the ABI as writing to a 13 bit
                 // field (32[12:0]), but masking out some bits of the value. To simplify our logic
-                // for applying relocations, we instead [un]set any fixed bits right now, then model
-                // the relocation as only writing to a smaller 10--12 bit field.
-                // TODO: because we flush input sections lazily, we can't actually write these bits
-                // immediately---we'll instead have to queue the writes somehow.
+                // for applying relocations, we split this action up: we create a relocation writing
+                // to the 10--12 bit long field which is actually variable, and queue a one-shot
+                // task to set the constant bits. We can't just write the bits now unfortunately
+                // because they may be in an input section which has not yet been loaded.
                 .PC10 => {
-                    // TODO: 32[12:10] = 0b000
+                    try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
                     try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.rel, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .L44 => {
-                    // TODO: 32[12:12] = 0b0
+                    try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:12] = 0b0" });
                     try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.abs, .{ .dest = .@"32[11:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .TLS_LDO_LOX10 => {
-                    // TODO: 32[12:10] = 0b000
+                    try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
                     try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.dtpoff, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .TLS_LE_LOX10 => {
-                    // TODO: 32[12:10] = 0b111
+                    try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b111" });
                     try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.tpoff, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .GOT10 => {
-                    // TODO: 32[12:10] = 0b000
+                    try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
                     elf.addGotRelocAssumeCapacity(node, offset, .{ .symbol = target }, addend, .simple(.offset, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .TLS_GD_LO10 => {
-                    // TODO: 32[12:10] = 0b000
+                    try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
                     elf.addGotRelocAssumeCapacity(node, offset, .{ .tlsgd0 = target }, addend, .simple(.offset, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
                 .TLS_LDM_LO10 => {
-                    // TODO: 32[12:10] = 0b000
+                    try elf.one_shot_fixups.append(elf.base.comp.gpa, .{ .node = node, .offset = offset, .action = .@"32[12:10] = 0b000" });
                     elf.addGotRelocAssumeCapacity(node, offset, .tlsld0, addend, .simple(.offset, .{ .dest = .@"32[9:0]", .cast = .trunc, .shift = .@"0" }));
                 },
             },
@@ -7391,6 +7405,25 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
             };
             break :task;
         }
+        if (elf.one_shot_fixups.items.len > 0) {
+            // Each of these is very simple, so an unreasonable amount of overhead would be
+            // introduced if we only did one per `idle` call. Also, there is no risk of this work
+            // being invalidated. So let's just flush the entire queue at once.
+            for (elf.one_shot_fixups.items) |isw| {
+                const dest_slice = isw.node.slice(&elf.mf)[isw.offset..][0..4];
+                const old: u32 = std.mem.readInt(u32, dest_slice, elf.targetEndian());
+                const new: u32 = switch (isw.action) {
+                    // zig fmt: off
+                    .@"32[12:10] = 0b000" => old & 0b11111111_11111111_11100011_11111111,
+                    .@"32[12:10] = 0b111" => old | 0b00000000_00000000_00011100_00000000,
+                    .@"32[12:12] = 0b0"   => old & 0b11111111_11111111_11101111_11111111,
+                    // zig fmt: on
+                };
+                std.mem.writeInt(u32, dest_slice, new, elf.targetEndian());
+            }
+            elf.one_shot_fixups.clearRetainingCapacity();
+            break :task;
+        }
         if (elf.changed_symtab_index.pop()) |kv| {
             const sub_prog_node = elf.mf.update_prog_node.start(kv.key.slice(elf), 0);
             defer sub_prog_node.end();
@@ -7481,6 +7514,7 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
         }
     }
     if (elf.input_sections.items.len > elf.input_section_pending_index) return true;
+    if (elf.one_shot_fixups.items.len > 0) return true;
     if (elf.changed_symtab_index.count() > 0) return true;
     if (elf.mf.updates.items.len > 0) return true;
     return false;
