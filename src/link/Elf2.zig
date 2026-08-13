@@ -6665,7 +6665,7 @@ fn addRelocAssumeCapacity(
 
                 .WDISP30 => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.rel,    .{ .dest = .@"32[29:0]", .cast = .signed,   .shift = .@"2_exact" })),
                 .WPLT30  => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.pltrel, .{ .dest = .@"32[29:0]", .cast = .signed,   .shift = .@"2_exact" })),
-                .PC22    => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.rel,    .{ .dest = .@"32[21:0]", .cast = .signed,   .shift = .@"10" })),
+                .PC22    => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.rel,    .{ .dest = .@"32[21:0]", .cast = .unsigned, .shift = .@"10" })),
                 .H44     => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.abs,    .{ .dest = .@"32[21:0]", .cast = .unsigned, .shift = .@"22" })),
                 .M44     => try elf.addSymbolRelocAssumeCapacity(node, offset, target, addend, .simple(.abs,    .{ .dest = .@"32[9:0]",  .cast = .trunc,    .shift = .@"12" })),
 
