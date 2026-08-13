@@ -924,9 +924,8 @@ const Os = switch (builtin.os.tag) {
         }
         fn deinit(w: *Watch) void {
             const gpa = w.maker.gpa;
-            const io = w.maker.io;
+            const io = w.maker.graph.io;
             w.os.fse.deinit(gpa, io);
-            w.dir_table.deinit(gpa);
             w.* = undefined;
         }
         fn update(w: *Watch, steps: []const Configuration.Step.Index) !void {
