@@ -728,7 +728,7 @@ const Os = switch (builtin.os.tag) {
         fn deinit(w: *Watch) void {
             const gpa = w.maker.gpa;
 
-            for (w.os.handles.items(.rs), w.os.handles.items(.dir_fd)) |rs, dir_fd| {
+            for (w.os.handles.items(.rs), w.os.handles.items(.dir_fd)) |*rs, dir_fd| {
                 rs.deinit(gpa);
                 Os.Threaded.closeFd(dir_fd);
             }
