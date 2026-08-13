@@ -3521,6 +3521,10 @@ fn initHeaders(
         rodata: u32,
         text: u32,
         data: u32,
+        /// On most targets this is `undefined`, but on machines where JUMP_SLOT relocations write
+        /// directly to the PLT, we place the PLT in its own segment in order to avoid making the
+        /// general data segment RWX.
+        plt: u32,
         tls: u32,
         dynamic: u32,
         relro: u32,
@@ -3552,6 +3556,10 @@ fn initHeaders(
                 defer phnum += 1;
                 break :phndx phnum;
             },
+            .plt = if (plt.got_plt == null) phndx: {
+                defer phnum += 1;
+                break :phndx phnum;
+            } else undefined,
             .tls = if (comp.config.any_non_single_threaded) phndx: {
                 defer phnum += 1;
                 break :phndx phnum;
@@ -3721,6 +3729,16 @@ fn initHeaders(
         elf.nodes.appendAssumeCapacity(.{ .segment = phndx.data });
         elf.phdrs.items[phndx.data] = elf.ni.data;
 
+        if (plt.got_plt == null) {
+            const plt_ni = try elf.mf.addLastChildNode(gpa, elf.ni.elf, .{
+                .alignment = node_block_align,
+                .moved = true,
+                .bubbles_moved = false,
+            });
+            elf.nodes.appendAssumeCapacity(.{ .segment = phndx.plt });
+            elf.phdrs.items[phndx.plt] = plt_ni;
+        }
+
         elf.ni.data_rel_ro = try elf.mf.addOnlyChildNode(gpa, elf.ni.data, .{
             // Must be at least `addr_align` for the `PT_DYNAMIC` node to be placed inside this one
             // later (if `have_dynamic_section`). Keep in sync with `elf.ni.data` alignment above.
@@ -3843,6 +3861,20 @@ fn initHeaders(
                     .flags = .{ .R = true, .W = true },
                     .@"align" = @intCast(page_align.toByteUnits()),
                 };
+
+                if (plt.got_plt == null) {
+                    const ph_plt = &phdr[phndx.plt];
+                    ph_plt.* = .{
+                        .type = .NULL,
+                        .offset = 0,
+                        .vaddr = @intCast(base_vaddr),
+                        .paddr = @intCast(base_vaddr),
+                        .filesz = 0,
+                        .memsz = 0,
+                        .flags = .{ .R = true, .W = true, .X = true },
+                        .@"align" = @intCast(page_align.toByteUnits()),
+                    };
+                }
 
                 if (comp.config.any_non_single_threaded) {
                     const ph_tls = &phdr[phndx.tls];
@@ -4001,29 +4033,34 @@ fn initHeaders(
             .addralign = addr_align,
             .entsize = @intCast(addr_align.toByteUnits()),
         });
-        if (plt.got_plt) |got_plt| elf.shndx.got_plt = try elf.addSection(
-            if (elf.options.z_now) elf.ni.data_rel_ro else elf.ni.data,
-            .{
+        if (plt.got_plt) |got_plt| {
+            const got_plt_segment_ni = if (elf.options.z_now) elf.ni.data_rel_ro else elf.ni.data;
+            elf.shndx.got_plt = try elf.addSection(got_plt_segment_ni, .{
                 .name = ".got.plt",
                 .type = .PROGBITS,
                 .flags = .{ .WRITE = true, .ALLOC = true },
                 .size = got_plt.header_entries * elf.targetPtrSize(),
                 .addralign = addr_align,
                 .entsize = @intCast(addr_align.toByteUnits()),
-            },
-        );
-        elf.shndx.plt = try elf.addSection(elf.ni.text, .{
-            .name = ".plt",
-            .type = .PROGBITS,
-            .flags = .{
-                .ALLOC = true,
-                .EXECINSTR = true,
-                .WRITE = plt.got_plt == null,
-            },
-            .size = plt.entry_size * plt.header_entries,
-            .addralign = plt.@"align",
-            .node_align = node_block_align,
-        });
+            });
+            elf.shndx.plt = try elf.addSection(elf.ni.text, .{
+                .name = ".plt",
+                .type = .PROGBITS,
+                .flags = .{ .ALLOC = true, .EXECINSTR = true },
+                .size = plt.entry_size * plt.header_entries,
+                .addralign = plt.@"align",
+                .node_align = node_block_align,
+            });
+        } else {
+            elf.shndx.plt = try elf.addSection(elf.phdrs.items[phndx.plt], .{
+                .name = ".plt",
+                .type = .PROGBITS,
+                .flags = .{ .ALLOC = true, .WRITE = true, .EXECINSTR = true },
+                .size = plt.entry_size * plt.header_entries,
+                .addralign = plt.@"align",
+                .node_align = node_block_align,
+            });
+        }
         if (plt.plt_sec != null) elf.shndx.plt_sec = try elf.addSection(elf.ni.text, .{
             .name = ".plt.sec",
             .flags = .{ .ALLOC = true, .EXECINSTR = true },
