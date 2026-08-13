@@ -7045,7 +7045,7 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
             const entry_ptr: *class.ElfN().Addr = @ptrCast(@alignCast(
                 elf.shndx.got.get(elf).ni.slice(&elf.mf)[offset..][0..addr_size],
             ));
-            entry_ptr.* = switch (entry_value) {
+            elf.targetStore(entry_ptr, switch (entry_value) {
                 .unsigned => |x| @intCast(x),
                 .signed => |x| switch (class) {
                     .NONE, _ => comptime unreachable,
@@ -7053,7 +7053,7 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
                     .@"64" => @bitCast(x),
                 },
                 .reloc => 0,
-            };
+            });
             break :got_entry_addr elf.targetLoad(&got_shdr.addr) + offset;
         },
     };
