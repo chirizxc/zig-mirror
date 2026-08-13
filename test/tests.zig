@@ -555,6 +555,7 @@ const module_test_targets = blk: {
                 .abi = .musleabi,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -565,6 +566,7 @@ const module_test_targets = blk: {
             .linkage = .dynamic,
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -573,6 +575,7 @@ const module_test_targets = blk: {
                 .abi = .musleabihf,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -583,6 +586,7 @@ const module_test_targets = blk: {
             .linkage = .dynamic,
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -591,6 +595,7 @@ const module_test_targets = blk: {
                 .abi = .gnueabi,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -599,6 +604,7 @@ const module_test_targets = blk: {
                 .abi = .gnueabihf,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
 
         .{
@@ -622,6 +628,7 @@ const module_test_targets = blk: {
                 .abi = .musleabi,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -632,6 +639,7 @@ const module_test_targets = blk: {
             .linkage = .dynamic,
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -640,6 +648,7 @@ const module_test_targets = blk: {
                 .abi = .musleabihf,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -650,6 +659,7 @@ const module_test_targets = blk: {
             .linkage = .dynamic,
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -658,6 +668,7 @@ const module_test_targets = blk: {
                 .abi = .gnueabi,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -666,6 +677,7 @@ const module_test_targets = blk: {
                 .abi = .gnueabihf,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
 
         .{
@@ -689,6 +701,7 @@ const module_test_targets = blk: {
                 .abi = .muslabi64,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -699,6 +712,7 @@ const module_test_targets = blk: {
             .linkage = .dynamic,
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -707,6 +721,7 @@ const module_test_targets = blk: {
                 .abi = .muslabin32,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -717,6 +732,7 @@ const module_test_targets = blk: {
             .linkage = .dynamic,
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -725,6 +741,7 @@ const module_test_targets = blk: {
                 .abi = .gnuabi64,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -733,6 +750,7 @@ const module_test_targets = blk: {
                 .abi = .gnuabin32,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
 
         .{
@@ -756,6 +774,7 @@ const module_test_targets = blk: {
                 .abi = .muslabi64,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -766,6 +785,7 @@ const module_test_targets = blk: {
             .linkage = .dynamic,
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -775,6 +795,7 @@ const module_test_targets = blk: {
             },
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -785,6 +806,7 @@ const module_test_targets = blk: {
             .linkage = .dynamic,
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -793,6 +815,7 @@ const module_test_targets = blk: {
                 .abi = .gnuabi64,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -802,6 +825,7 @@ const module_test_targets = blk: {
             },
             .link_libc = true,
             .extra_target = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
 
         .{
@@ -1434,6 +1458,7 @@ const module_test_targets = blk: {
                 .abi = .eabi,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -1442,6 +1467,7 @@ const module_test_targets = blk: {
                 .abi = .eabihf,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
 
         .{
@@ -1451,6 +1477,7 @@ const module_test_targets = blk: {
                 .abi = .eabi,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
         .{
             .target = .{
@@ -1459,6 +1486,7 @@ const module_test_targets = blk: {
                 .abi = .eabihf,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
 
         .{
@@ -1533,6 +1561,7 @@ const module_test_targets = blk: {
                 .abi = .none,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
 
         .{
@@ -1542,6 +1571,7 @@ const module_test_targets = blk: {
                 .abi = .none,
             },
             .link_libc = true,
+            .skip_modules = &.{"std"}, // https://github.com/llvm/llvm-project/issues/112010
         },
 
         .{
