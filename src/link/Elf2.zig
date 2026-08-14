@@ -1794,66 +1794,74 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
         )),
     };
 
-    {
-        const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
-        const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
-        assert(elf.targetLoad(&header.nchain) == cur_dynsym_count);
-        const nbucket = elf.targetLoad(&header.nbucket);
-        if (nbucket >= min_buckets) {
-            // We don't need to add any buckets, but we still need to make sure the section is large
-            // enough to fit `max_dynsym_count` chains.
-            const need_size = @sizeOf(std.elf.hash.Header) + (nbucket + max_dynsym_count) * 4;
-            try elf.ensureNodeSize(elf.shndx.hash.get(elf).ni, need_size);
-            return;
-        }
-        // We need more buckets, so we'll have to rebuild the hash table.
-    }
+    switch (elf.targetDynsymHashInfo()) {
+        inline else => |info| {
+            {
+                const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+                const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
+                assert(elf.targetLoad(&header.nchain) == cur_dynsym_count);
+                const nbucket = elf.targetLoad(&header.nbucket);
+                if (nbucket >= min_buckets) {
+                    // We don't need to add any buckets, but we still need to make sure the section is large
+                    // enough to fit `max_dynsym_count` chains.
+                    const need_size = @sizeOf(info.Header()) + (nbucket + max_dynsym_count) * 4;
+                    try elf.ensureNodeSize(elf.shndx.hash.get(elf).ni, need_size);
+                    return;
+                }
+                // We need more buckets, so we'll have to rebuild the hash table.
+            }
 
-    // Rebuilding the hash table is quite expensive, so to avoid doing it too often we use a large
-    // growth factor (* 2) for `nbucket`.
-    const new_nbucket = min_buckets * 2;
+            // Rebuilding the hash table is quite expensive, so to avoid doing it too often we use a large
+            // growth factor (* 2) for `nbucket`.
+            const new_nbucket = min_buckets * 2;
 
-    {
-        const need_size = @sizeOf(std.elf.hash.Header) + (new_nbucket + max_dynsym_count) * 4;
-        try elf.ensureNodeSize(elf.shndx.hash.get(elf).ni, need_size);
-    }
+            {
+                const need_size = @sizeOf(info.Header()) + (new_nbucket + max_dynsym_count) * 4;
+                try elf.ensureNodeSize(elf.shndx.hash.get(elf).ni, need_size);
+            }
 
-    elf.mf.nodes_lock.lock();
-    defer elf.mf.nodes_lock.unlock();
+            elf.mf.nodes_lock.lock();
+            defer elf.mf.nodes_lock.unlock();
 
-    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
-    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
-    const trailing: []u32 = @ptrCast(section_slice[@sizeOf(std.elf.hash.Header)..]);
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
+            const trailing: []info.Int() = @ptrCast(section_slice[@sizeOf(info.Header())..]);
 
-    header.* = .{ .nbucket = new_nbucket, .nchain = cur_dynsym_count };
-    if (elf.targetEndian() != std.lang.Endian.native) {
-        std.mem.byteSwapAllFields(std.elf.hash.Header, header);
-    }
-    const buckets: []u32 = trailing[0..elf.targetLoad(&header.nbucket)];
-    const chains: []u32 = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+            header.* = .{ .nbucket = new_nbucket, .nchain = cur_dynsym_count };
+            if (elf.targetEndian() != std.lang.Endian.native) {
+                std.mem.byteSwapAllFields(info.Header(), header);
+            }
+            const buckets: []info.Int() = trailing[0..elf.targetLoad(&header.nbucket)];
+            const chains: []info.Int() = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
 
-    @memset(buckets, 0);
-    chains[0] = 0;
-    for (1..cur_dynsym_count, chains[1..]) |dynsym_index_usize, *chain| {
-        const dynsym_index: u32 = @intCast(dynsym_index_usize);
-        const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
-            inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
-        };
-        const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
-        // Make this symbol the head of that bucket, and chain to the old head.
-        chain.* = buckets[b];
-        elf.targetStore(&buckets[b], dynsym_index);
+            @memset(buckets, 0);
+            chains[0] = 0;
+            for (1..cur_dynsym_count, chains[1..]) |dynsym_index_usize, *chain| {
+                const dynsym_index: u32 = @intCast(dynsym_index_usize);
+                const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+                    inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
+                };
+                const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+                // Make this symbol the head of that bucket, and chain to the old head.
+                chain.* = buckets[b];
+                elf.targetStore(&buckets[b], dynsym_index);
+            }
+        },
     }
 }
 
 fn appendDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
-    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
-    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
-    assert(elf.targetLoad(&header.nchain) == dynsym_index);
-    elf.targetStore(&header.nchain, dynsym_index + 1);
+    switch (elf.targetDynsymHashInfo()) {
+        inline else => |info| {
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
+            assert(elf.targetLoad(&header.nchain) == dynsym_index);
+            elf.targetStore(&header.nchain, dynsym_index + 1);
 
-    switch (elf.shdrPtr(elf.shndx.hash)) {
-        inline else => |shdr| elf.targetStore(&shdr.size, elf.targetLoad(&shdr.size) + 4),
+            switch (elf.shdrPtr(elf.shndx.hash)) {
+                inline else => |shdr| elf.targetStore(&shdr.size, elf.targetLoad(&shdr.size) + @sizeOf(info.Int())),
+            }
+        },
     }
 
     elf.populateDynsymHashEntry(dynsym_index);
@@ -1864,31 +1872,39 @@ fn populateDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
 
     assert(dynsym_index != 0);
 
-    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
-    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
-    const trailing: []u32 = @ptrCast(section_slice[@sizeOf(std.elf.hash.Header)..]);
+    switch (elf.targetDynsymHashInfo()) {
+        inline else => |info| {
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
+            const trailing: []info.Int() = @ptrCast(section_slice[@sizeOf(info.Header())..]);
 
-    const buckets: []u32 = trailing[0..elf.targetLoad(&header.nbucket)];
-    const chains: []u32 = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+            const buckets: []info.Int() = trailing[0..elf.targetLoad(&header.nbucket)];
+            const chains: []info.Int() = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
 
-    const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
-        inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
-    };
-    const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
-    // Make this symbol the head of that bucket, and chain to the old head.
-    chains[dynsym_index] = buckets[b];
-    elf.targetStore(&buckets[b], dynsym_index);
+            const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+                inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
+            };
+            const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+            // Make this symbol the head of that bucket, and chain to the old head.
+            chains[dynsym_index] = buckets[b];
+            elf.targetStore(&buckets[b], dynsym_index);
+        },
+    }
 }
 fn popDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
     elf.clearDynsymHashEntry(dynsym_index);
 
-    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
-    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
-    assert(elf.targetLoad(&header.nchain) == dynsym_index + 1);
-    elf.targetStore(&header.nchain, dynsym_index);
+    switch (elf.targetDynsymHashInfo()) {
+        inline else => |info| {
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
+            assert(elf.targetLoad(&header.nchain) == dynsym_index + 1);
+            elf.targetStore(&header.nchain, dynsym_index);
 
-    switch (elf.shdrPtr(elf.shndx.hash)) {
-        inline else => |shdr| elf.targetStore(&shdr.size, elf.targetLoad(&shdr.size) - 4),
+            switch (elf.shdrPtr(elf.shndx.hash)) {
+                inline else => |shdr| elf.targetStore(&shdr.size, elf.targetLoad(&shdr.size) - @sizeOf(info.Int())),
+            }
+        },
     }
 }
 fn clearDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
@@ -1897,34 +1913,38 @@ fn clearDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
 
     assert(dynsym_index != 0);
 
-    const section_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
-    const header: *std.elf.hash.Header = @ptrCast(section_slice[0..@sizeOf(std.elf.hash.Header)]);
-    const trailing: []u32 = @ptrCast(section_slice[@sizeOf(std.elf.hash.Header)..]);
+    switch (elf.targetDynsymHashInfo()) {
+        inline else => |info| {
+            const section_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+            const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
+            const trailing: []info.Int() = @ptrCast(section_slice[@sizeOf(info.Header())..]);
 
-    const buckets: []u32 = trailing[0..elf.targetLoad(&header.nbucket)];
-    const chains: []u32 = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+            const buckets: []info.Int() = trailing[0..elf.targetLoad(&header.nbucket)];
+            const chains: []info.Int() = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
 
-    const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
-        inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
-    };
-    const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+            const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+                inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
+            };
+            const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
 
-    const next_dynsym_index = elf.targetLoad(&chains[dynsym_index]);
-    elf.targetStore(&chains[dynsym_index], 0);
+            const next_dynsym_index = elf.targetLoad(&chains[dynsym_index]);
+            elf.targetStore(&chains[dynsym_index], 0);
 
-    // To remove `dynsym_index` from the singly-linked list, we need to iterate the chain to find
-    // and replace it. But since this is, well, a hash table, that's actually fine.
-    if (elf.targetLoad(&buckets[b]) == dynsym_index) {
-        elf.targetStore(&buckets[b], next_dynsym_index);
-    } else {
-        var cur = elf.targetLoad(&buckets[b]);
-        while (true) {
-            assert(cur != 0); // `dynsym_index` is definitely somewhere in the chain
-            if (elf.targetLoad(&chains[cur]) == dynsym_index) break;
-            cur = elf.targetLoad(&chains[cur]);
-        }
-        // We found `dynsym_index`; replace it with `next_dynsym_index`.
-        elf.targetStore(&chains[cur], next_dynsym_index);
+            // To remove `dynsym_index` from the singly-linked list, we need to iterate the chain to find
+            // and replace it. But since this is, well, a hash table, that's actually fine.
+            if (elf.targetLoad(&buckets[b]) == dynsym_index) {
+                elf.targetStore(&buckets[b], next_dynsym_index);
+            } else {
+                var cur = elf.targetLoad(&buckets[b]);
+                while (true) {
+                    assert(cur != 0); // `dynsym_index` is definitely somewhere in the chain
+                    if (elf.targetLoad(&chains[cur]) == dynsym_index) break;
+                    cur = elf.targetLoad(&chains[cur]);
+                }
+                // We found `dynsym_index`; replace it with `next_dynsym_index`.
+                elf.targetStore(&chains[cur], next_dynsym_index);
+            }
+        },
     }
 }
 
@@ -4169,24 +4189,30 @@ fn initHeaders(
                 .entsize = @intCast(addr_align.toByteUnits() * 2),
                 .node_align = addr_align,
             });
-            elf.shndx.hash = try elf.addSection(elf.ni.rodata, .{
-                .name = ".hash",
-                .type = .HASH,
-                .flags = .{ .ALLOC = true },
-                .link = elf.shndx.dynsym.toSection().?,
-                .addralign = .@"4",
-                // initially: nbucket = 8, nchain = 1
-                .size = @sizeOf(std.elf.hash.Header) + (8 + 1) * 4,
-            });
-            {
-                const hash_slice: []align(4) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
-                const header: *std.elf.hash.Header = @ptrCast(hash_slice[0..@sizeOf(std.elf.hash.Header)]);
-                header.* = .{ .nbucket = 8, .nchain = 1 };
-                if (elf.targetEndian() != std.lang.Endian.native) {
-                    std.mem.byteSwapAllFields(std.elf.hash.Header, header);
-                }
-                // The initial bucket and chain values are all 0, but `MappedFile` initialized the
-                // node with zeroes anyway, so no need to memset.
+            switch (elf.targetDynsymHashInfo()) {
+                inline else => |info| {
+                    elf.shndx.hash = try elf.addSection(elf.ni.rodata, .{
+                        .name = ".hash",
+                        .type = .HASH,
+                        .flags = .{ .ALLOC = true },
+                        .link = elf.shndx.dynsym.toSection().?,
+                        // It's unclear what value is correct for the alignment. binutils uses 8 everywhere,
+                        // while lld uses 4 everywhere (but lld lacks support for the alpha/s390x special
+                        // case). Matching the hash word (= entry) size seems like the actually sane choice,
+                        // and is what mold does too.
+                        .addralign = .fromByteUnits(@sizeOf(info.Int())),
+                        // initially: nbucket = 8 + nchain = 1
+                        .size = @sizeOf(info.Header()) + @sizeOf(info.Int()) * (8 + 1),
+                    });
+                    const hash_slice: []align(@sizeOf(info.Int())) u8 = @alignCast(elf.shndx.hash.get(elf).ni.slice(&elf.mf));
+                    const header: *info.Header() = @ptrCast(hash_slice[0..@sizeOf(info.Header())]);
+                    header.* = .{ .nbucket = 8, .nchain = 1 };
+                    if (elf.targetEndian() != std.lang.Endian.native) {
+                        std.mem.byteSwapAllFields(info.Header(), header);
+                    }
+                    // The initial bucket and chain values are all 0, but `MappedFile` initialized
+                    // the node with zeroes anyway, so no need to memset.
+                },
             }
 
             switch (machine) {
@@ -4794,6 +4820,30 @@ const PltInfo = struct {
 };
 fn targetPltInfo(elf: *const Elf) PltInfo {
     return .fromMachine(elf.ehdrMachine());
+}
+const DynsymHashInfo = enum(u32) {
+    @"4" = 4,
+    @"8" = 8,
+
+    fn Int(comptime self: DynsymHashInfo) type {
+        return switch (self) {
+            .@"4" => u32,
+            .@"8" => u64,
+        };
+    }
+
+    fn Header(comptime self: DynsymHashInfo) type {
+        return switch (self) {
+            .@"4" => std.elf.hash.Header32,
+            .@"8" => std.elf.hash.Header64,
+        };
+    }
+};
+fn targetDynsymHashInfo(elf: *const Elf) DynsymHashInfo {
+    return switch (elf.ehdrMachine()) {
+        else => .@"4",
+        // TODO: Alpha and S390x will need to use either `."@4"` or `.@"8"` depending on `elf.identClass()`.
+    };
 }
 fn targetLoad(elf: *const Elf, ptr: anytype) @typeInfo(@TypeOf(ptr)).pointer.child {
     const pointer_ty = @typeInfo(@TypeOf(ptr)).pointer;
