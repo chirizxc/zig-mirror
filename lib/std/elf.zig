@@ -3311,6 +3311,7 @@ pub const gnu_hash = struct {
 /// Resources:
 /// * https://refspecs.linuxfoundation.org/elf/gabi4+/ch5.dynamic.html#hash
 /// * https://flapenguin.me/elf-dt-hash
+/// * https://github.com/IBM/s390x-abi
 pub const hash = struct {
     pub fn calculate(name: []const u8) u32 {
         var h: u32 = 0;
@@ -3322,7 +3323,7 @@ pub const hash = struct {
         return h;
     }
 
-    /// The header of a `SHT.HASH` section. Immediately followed by:
+    /// The header of a `SHT.HASH` section on most architectures. Immediately followed by:
     /// * `buckets: [nbucket]u32`
     /// * `chains: [nchain]u32`
     ///
@@ -3333,9 +3334,21 @@ pub const hash = struct {
     ///
     /// `chain[sym_index]` is the index of the next symbol in the same bucket as `sym_index`. If
     /// `sym_index` is the last symbol in its bucket then the value is 0 (`STN_UNDEF`).
-    pub const Header = extern struct {
+    ///
+    /// See also `Header64`.
+    pub const Header32 = extern struct {
         nbucket: u32,
         nchain: u32,
+    };
+
+    /// The header of a `SHT.HASH` section on alpha and s390x. Immediately followed by:
+    /// * `buckets: [nbucket]u64`
+    /// * `chains: [nchain]u64`
+    ///
+    /// See also `Header32`.
+    pub const Header64 = extern struct {
+        nbucket: u64,
+        nchain: u64,
     };
 };
 
