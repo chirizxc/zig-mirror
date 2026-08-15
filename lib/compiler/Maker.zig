@@ -614,6 +614,8 @@ pub fn main(init: process.Init.Minimal) !void {
     comptime assert(1 == @backingInt(std.zig.Server.Message.PathPrefix.zig_lib));
     comptime assert(2 == @backingInt(std.zig.Server.Message.PathPrefix.local_cache));
     comptime assert(3 == @backingInt(std.zig.Server.Message.PathPrefix.global_cache));
+    comptime assert(4 == @backingInt(std.zig.Server.Message.PathPrefix.build_root));
+    comptime assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == 5);
 
     graph.cache.hash.addBytes(builtin.zig_version_string);
 

@@ -397,6 +397,7 @@ pub const Path = struct {
         global_cache,
         /// `sub_path` is relative to the local cache directory on `Compilation`.
         local_cache,
+        build_root,
         /// `sub_path` is not relative to any of the roots listed above.
         /// It is resolved starting with `Directories.cwd`; so it is an absolute path on most
         /// targets, but cwd-relative on WASI. We do not make it cwd-relative on other targets
@@ -439,6 +440,7 @@ pub const Path = struct {
             .zig_lib => dirs.zig_lib.handle,
             .global_cache => dirs.global_cache.handle,
             .local_cache => dirs.local_cache.handle,
+            .build_root => dirs.build_root.handle,
         };
         if (p.sub_path.len == 0) return .{ dir, "." };
         assert(!fs.path.isAbsolute(p.sub_path));
@@ -457,6 +459,7 @@ pub const Path = struct {
                 .zig_lib => f.comp.dirs.zig_lib.path orelse ".",
                 .global_cache => f.comp.dirs.global_cache.path orelse ".",
                 .local_cache => f.comp.dirs.local_cache.path orelse ".",
+                .build_root => f.comp.dirs.build_root.path orelse ".",
                 .none => {
                     const cwd_sub_path = absToCwdRelative(f.p.sub_path, f.comp.dirs.cwd);
                     try w.writeAll(cwd_sub_path);
@@ -581,6 +584,7 @@ pub const Path = struct {
                 .zig_lib => dirs.zig_lib.path orelse "",
                 .global_cache => dirs.global_cache.path orelse "",
                 .local_cache => dirs.local_cache.path orelse "",
+                .build_root => dirs.build_root.path orelse "",
                 .none => "",
             },
             sub_path,
@@ -603,6 +607,7 @@ pub const Path = struct {
                 .zig_lib => dirs.zig_lib.path orelse "",
                 .global_cache => dirs.global_cache.path orelse "",
                 .local_cache => dirs.local_cache.path orelse "",
+                .build_root => dirs.build_root.path orelse "",
                 .none => "",
             },
             p.sub_path,
@@ -622,6 +627,7 @@ pub const Path = struct {
                 .zig_lib => dirs.zig_lib.path orelse "",
                 .global_cache => dirs.global_cache.path orelse "",
                 .local_cache => dirs.local_cache.path orelse "",
+                .build_root => dirs.build_root.path orelse "",
                 .none => "",
             },
             p.sub_path,
@@ -635,6 +641,7 @@ pub const Path = struct {
             .zig_lib => dirs.zig_lib,
             .global_cache => dirs.global_cache,
             .local_cache => dirs.local_cache,
+            .build_root => dirs.build_root,
             else => {
                 const cwd_sub_path = absToCwdRelative(p.sub_path, dirs.cwd);
                 return .{
@@ -658,13 +665,10 @@ pub const Path = struct {
             .zig_lib => dirs.zig_lib.path orelse "",
             .global_cache => dirs.global_cache.path orelse "",
             .local_cache => dirs.local_cache.path orelse "",
+            .build_root => dirs.build_root.path orelse "",
             .none => "",
         };
-        return fs.path.resolve(gpa, &.{
-            dirs.cwd,
-            root_path,
-            p.sub_path,
-        });
+        return fs.path.resolve(gpa, &.{ dirs.cwd, root_path, p.sub_path });
     }
 
     pub fn isNested(inner: Path, outer: Path) union(enum) {
@@ -1348,7 +1352,7 @@ pub const CacheMode = enum {
 pub const ParentWholeCache = struct {
     manifest: *Cache.Manifest,
     mutex: *std.Io.Mutex,
-    prefix_map: [4]u8,
+    prefix_map: [5]u8,
 };
 
 const CacheUse = union(CacheMode) {
@@ -1923,6 +1927,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
         }
 
         const error_limit = options.error_limit orelse (std.math.maxInt(u16) - 1);
+        const main_mod = options.main_mod orelse options.root_mod;
 
         // We put everything into the cache hash that *cannot be modified
         // during an incremental update*. For example, one cannot change the
@@ -1941,11 +1946,18 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
             },
             .cwd = options.dirs.cwd,
         };
-        // These correspond to std.zig.Server.Message.PathPrefix.
+        comptime assert(0 == @backingInt(std.zig.Server.Message.PathPrefix.cwd));
+        comptime assert(1 == @backingInt(std.zig.Server.Message.PathPrefix.zig_lib));
+        comptime assert(2 == @backingInt(std.zig.Server.Message.PathPrefix.local_cache));
+        comptime assert(3 == @backingInt(std.zig.Server.Message.PathPrefix.global_cache));
+        comptime assert(4 == @backingInt(std.zig.Server.Message.PathPrefix.build_root));
+        comptime assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == 5);
         cache.addPrefix(.{ .path = null, .handle = Io.Dir.cwd() });
         cache.addPrefix(options.dirs.zig_lib);
         cache.addPrefix(options.dirs.local_cache);
         cache.addPrefix(options.dirs.global_cache);
+        log.debug("addPrefix build_root {s}", .{options.dirs.build_root.path orelse "(null)"});
+        cache.addPrefix(options.dirs.build_root);
         errdefer cache.manifest_dir.close(io);
 
         // This is shared hasher state common to zig source and all C source files.
@@ -1981,7 +1993,6 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
         cache.hash.add(options.emit_docs != .no);
         // TODO audit this and make sure everything is in it
 
-        const main_mod = options.main_mod orelse options.root_mod;
         const comp = try arena.create(Compilation);
         const opt_zcu: ?*Zcu = if (have_zcu) blk: {
             // Pre-open the directory handles for cached ZIR code so that it does not need
@@ -3110,6 +3121,7 @@ pub fn appendFileSystemInput(comp: *Compilation, path: Compilation.Path) Allocat
         .zig_lib => comp.dirs.zig_lib,
         .global_cache => comp.dirs.global_cache,
         .local_cache => comp.dirs.local_cache,
+        .build_root => comp.dirs.build_root,
         .none => .cwd(),
     };
     const prefix: u8 = for (prefixes, 1..) |prefix_dir, i| {
@@ -3117,8 +3129,8 @@ pub fn appendFileSystemInput(comp: *Compilation, path: Compilation.Path) Allocat
             break @intCast(i);
         }
     } else std.debug.panic(
-        "missing prefix directory '{s}' ('{f}') for '{s}'",
-        .{ @tagName(path.root), want_prefix_dir, path.sub_path },
+        "missing prefix directory {t} ('{f}') for {q}",
+        .{ path.root, want_prefix_dir, path.sub_path },
     );
 
     // There may be concurrent calls to this function from C object workers and/or the main thread.
@@ -7316,6 +7328,7 @@ fn buildOutputFromZig(
                 1, // zig lib dir is the same
                 3, // local cache is mapped to global cache
                 3, // global cache is the same
+                0, // build root is not provided
             },
         },
         .incremental, .none => null,

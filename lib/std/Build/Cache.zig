@@ -418,7 +418,6 @@ pub const Manifest = struct {
     }
 
     fn addFileInner(self: *Manifest, prefixed_path: PrefixedPath, handle: ?Io.File, max_file_size: ?usize) usize {
-        assert(!std.fs.path.isAbsolute(prefixed_path.sub_path));
         const gop = self.files.getOrPutAssumeCapacityAdapted(prefixed_path, FilesAdapter{});
         if (gop.found_existing) {
             self.cache.gpa.free(prefixed_path.sub_path);
@@ -951,7 +950,6 @@ pub const Manifest = struct {
     /// will need to be recompiled if the imported file is changed.
     pub fn addFilePostFetch(self: *Manifest, file_path: []const u8, max_file_size: usize) ![]const u8 {
         assert(self.manifest_file != null);
-        assert(!std.fs.path.isAbsolute(file_path));
 
         const gpa = self.cache.gpa;
         const prefixed_path = try self.cache.findPrefix(file_path);
@@ -1009,7 +1007,6 @@ pub const Manifest = struct {
     /// whether or not `prefixed_path.sub_path` should be kept.
     pub fn addPrefixedPathPost(man: *Manifest, prefixed_path: PrefixedPath) !bool {
         assert(man.manifest_file != null);
-        assert(!std.fs.path.isAbsolute(prefixed_path.sub_path));
         const gpa = man.cache.gpa;
 
         const gop = try man.files.getOrPutAdapted(gpa, prefixed_path, FilesAdapter{});
@@ -1041,7 +1038,6 @@ pub const Manifest = struct {
         stat: File.Stat,
     ) !void {
         assert(self.manifest_file != null);
-        assert(!std.fs.path.isAbsolute(file_path));
         const gpa = self.cache.gpa;
 
         const prefixed_path = try self.cache.findPrefix(file_path);
@@ -1268,10 +1264,10 @@ pub const Manifest = struct {
         }
     }
 
-    pub fn populateOtherManifest(man: *Manifest, other: *Manifest, prefix_map: [4]u8) Allocator.Error!void {
+    pub fn populateOtherManifest(man: *Manifest, other: *Manifest, prefix_map: [5]u8) Allocator.Error!void {
         const gpa = other.cache.gpa;
         assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == man.cache.prefixes_len);
-        assert(man.cache.prefixes_len == 4);
+        assert(man.cache.prefixes_len == 5);
         for (man.files.keys()) |file| {
             const prefixed_path: PrefixedPath = .{
                 .prefix = prefix_map[file.prefixed_path.prefix],

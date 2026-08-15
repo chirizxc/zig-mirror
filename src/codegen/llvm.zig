@@ -1703,6 +1703,7 @@ pub const Object = struct {
             .zig_lib => dirs.zig_lib.path,
             .global_cache => dirs.global_cache.path,
             .local_cache => dirs.local_cache.path,
+            .build_root => dirs.build_root.path,
             .none => null,
         };
 

@@ -423,17 +423,16 @@ fn mainArgs(
                 .wasi => {},
                 else => process.executablePathAlloc(io, arena) catch |err| fatal("unable to find zig self exe path: {t}", .{err}),
             };
-            var dirs: std.zig.Directories = .init(
-                arena,
-                io,
-                EnvVar.ZIG_LIB_DIR.get(environ_map),
-                EnvVar.ZIG_GLOBAL_CACHE_DIR.get(environ_map),
-                .global,
-                preopens,
-                self_exe_path,
-                environ_map,
-                try std.zig.getResolvedCwd(io, arena),
-            );
+            var dirs: std.zig.Directories = .init(arena, io, .{
+                .override_zig_lib = EnvVar.ZIG_LIB_DIR.get(environ_map),
+                .override_global_cache = EnvVar.ZIG_GLOBAL_CACHE_DIR.get(environ_map),
+                .build_root = null,
+                .local_cache_strat = .global,
+                .preopens = preopens,
+                .self_exe_path = self_exe_path,
+                .environ_map = environ_map,
+                .cwd = try std.zig.getResolvedCwd(io, arena),
+            });
             defer dirs.deinit(io);
             const host = std.zig.resolveTargetQueryOrFatal(io, .{});
             var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
@@ -458,17 +457,16 @@ fn mainArgs(
                 .wasi => args[0],
                 else => process.executablePathAlloc(io, arena) catch |err| fatal("unable to find zig self exe path: {t}", .{err}),
             };
-            var dirs: std.zig.Directories = .init(
-                arena,
-                io,
-                EnvVar.ZIG_LIB_DIR.get(environ_map),
-                EnvVar.ZIG_GLOBAL_CACHE_DIR.get(environ_map),
-                .global,
-                preopens,
-                if (native_os != .wasi) self_exe_path,
-                environ_map,
-                try std.zig.getResolvedCwd(io, arena),
-            );
+            var dirs: std.zig.Directories = .init(arena, io, .{
+                .override_zig_lib = EnvVar.ZIG_LIB_DIR.get(environ_map),
+                .override_global_cache = EnvVar.ZIG_GLOBAL_CACHE_DIR.get(environ_map),
+                .build_root = null,
+                .local_cache_strat = .global,
+                .preopens = preopens,
+                .self_exe_path = if (native_os != .wasi) self_exe_path,
+                .environ_map = environ_map,
+                .cwd = try std.zig.getResolvedCwd(io, arena),
+            });
             defer dirs.deinit(io);
             const host = std.zig.resolveTargetQueryOrFatal(io, .{});
             var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
@@ -511,7 +509,7 @@ fn mainArgs(
     }
 }
 
-const usage_build_generic =
+const compile_usage =
     \\Usage: zig build-exe   [options] [files]
     \\       zig build-lib   [options] [files]
     \\       zig build-obj   [options] [files]
@@ -565,6 +563,7 @@ const usage_build_generic =
     \\  --cache-dir [path]        Override the local cache directory
     \\  --global-cache-dir [path] Override the global cache directory
     \\  --zig-lib-dir [path]      Override path to Zig installation lib directory
+    \\  --build-root [path]       Override path to project source files
     \\
     \\Global Compile Options:
     \\  --name [name]             Compilation unit name (not a file path)
@@ -1050,6 +1049,7 @@ fn buildOutputType(
     var rc_includes: std.zig.RcIncludes = .any;
     var manifest_file: ?[]const u8 = null;
     var linker_export_symbol_names: std.ArrayList([]const u8) = .empty;
+    var build_root_path: ?[]const u8 = null;
 
     // Tracks the position in c_source_files which have already their owner populated.
     var c_source_files_owner_index: usize = 0;
@@ -1163,7 +1163,7 @@ fn buildOutputType(
                         fatal("unable to read response file {q}: {t}", .{ resp_file_path, err });
                 } else if (mem.startsWith(u8, arg, "-")) {
                     if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
-                        try Io.File.stdout().writeStreamingAll(io, usage_build_generic);
+                        try Io.File.stdout().writeStreamingAll(io, compile_usage);
                         return cleanExit(io);
                     } else if (mem.eql(u8, arg, "--")) {
                         if (arg_mode == .run) {
@@ -1436,6 +1436,8 @@ fn buildOutputType(
                         override_global_cache_dir = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--zig-lib-dir")) {
                         override_lib_dir = args_iter.nextOrFatal();
+                    } else if (mem.eql(u8, arg, "--build-root")) {
+                        build_root_path = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--debug-log")) {
                         try addDebugLog(arena, args_iter.nextOrFatal());
                     } else if (mem.eql(u8, arg, "--listen")) {
@@ -3235,23 +3237,22 @@ fn buildOutputType(
     const cwd_path = try std.zig.getResolvedCwd(io, arena);
 
     // This `init` calls `fatal` on error.
-    var dirs: std.zig.Directories = .init(
-        arena,
-        io,
-        override_lib_dir,
-        override_global_cache_dir,
-        s: {
+    var dirs: std.zig.Directories = .init(arena, io, .{
+        .override_zig_lib = override_lib_dir,
+        .override_global_cache = override_global_cache_dir,
+        .build_root = build_root_path,
+        .local_cache_strat = s: {
             if (override_local_cache_dir) |p| break :s .{ .override = p };
             break :s switch (arg_mode) {
                 .run => .global,
                 else => .search,
             };
         },
-        preopens,
-        self_exe_path,
-        environ_map,
-        cwd_path,
-    );
+        .preopens = preopens,
+        .self_exe_path = self_exe_path,
+        .environ_map = environ_map,
+        .cwd = cwd_path,
+    });
     defer dirs.deinit(io);
 
     if (linker_optimization) |o| warn("ignoring deprecated linker optimization setting {q}", .{o});
@@ -4998,17 +4999,16 @@ fn jitCmdInner(
     const cwd_path = try std.zig.getResolvedCwd(io, arena);
 
     // This `init` calls `fatal` on error.
-    var dirs: std.zig.Directories = .init(
-        arena,
-        io,
-        override_lib_dir,
-        override_global_cache_dir,
-        .global,
-        preopens,
-        self_exe_path,
-        environ_map,
-        cwd_path,
-    );
+    var dirs: std.zig.Directories = .init(arena, io, .{
+        .override_zig_lib = override_lib_dir,
+        .override_global_cache = override_global_cache_dir,
+        .build_root = null,
+        .local_cache_strat = .global,
+        .preopens = preopens,
+        .self_exe_path = self_exe_path,
+        .environ_map = environ_map,
+        .cwd = cwd_path,
+    });
     defer dirs.deinit(io);
 
     var child_argv: std.ArrayList([]const u8) = .empty;
