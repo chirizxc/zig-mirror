@@ -3645,77 +3645,22 @@ fn initHeaders(
 
     const entsize: struct { ph: u32, sh: u32 } = switch (class) {
         .NONE, _ => unreachable,
-        inline else => |ct_class| entsize: {
-            const ElfN = ct_class.ElfN();
-            elf.ni.ehdr = try elf.mf.addLastChildNode(gpa, elf.ni.elf, .{
-                .size = @sizeOf(ElfN.Ehdr),
-                .alignment = addr_align,
-                .fixed = true,
-            });
-            elf.nodes.appendAssumeCapacity(.ehdr);
-
-            const ehdr: *ElfN.Ehdr = @ptrCast(@alignCast(elf.ni.ehdr.slice(&elf.mf)));
-            ehdr.ident = .{
-                .class = class,
-                .data = data,
-                .version = 1,
-                .osabi = osabi,
-                .abiversion = 0,
-            };
-            ehdr.type = @"type".toElf();
-            ehdr.machine = machine.toElf();
-            ehdr.version = 1;
-            ehdr.entry = 0;
-            ehdr.phoff = 0;
-            ehdr.shoff = 0;
-            ehdr.flags = switch (machine) {
-                .LOONGARCH => .{ .loongarch = .{
-                    .base_abi_modifier = mod: {
-                        const cpu = comp.getTarget().cpu;
-                        if (cpu.has(.loongarch, .d)) break :mod .d;
-                        if (cpu.has(.loongarch, .f)) break :mod .f;
-                        break :mod .s;
-                    },
-                    .abi_extension = .base,
-                    .abi_version = 1,
-                } },
-                .SPARCV9 => .{ .sparc = .{
-                    .mm = .rmo,
-                    .ext = .{
-                        .@"32plus" = false,
-                        .sun_us1 = false,
-                        .hal_r1 = false,
-                        .sun_us3 = false,
-                        .le_data = false,
-                    },
-                } },
-                .X86_64 => .{ .int = 0 },
-                .AARCH64, .PPC64, .RISCV => @panic(@tagName(machine)),
-            };
-            ehdr.ehsize = @sizeOf(ElfN.Ehdr);
-            ehdr.phentsize = @sizeOf(ElfN.Phdr);
-            ehdr.phnum = @min(phnum, std.elf.PN_XNUM);
-            ehdr.shentsize = @sizeOf(ElfN.Shdr);
-            ehdr.shnum = 1; // Only the null shdr initially---will be incremented by `addSection`
-            ehdr.shstrndx = std.elf.SHN_UNDEF;
-            if (elf.targetEndian() != native_endian) std.mem.byteSwapAllFields(ElfN.Ehdr, ehdr);
-
-            break :entsize .{ .ph = @sizeOf(ElfN.Phdr), .sh = @sizeOf(ElfN.Shdr) };
+        inline else => |ct_class| .{
+            .ph = @sizeOf(ct_class.ElfN().Phdr),
+            .sh = @sizeOf(ct_class.ElfN().Shdr),
         },
     };
 
-    elf.ni.shdr = try elf.mf.addLastChildNode(gpa, elf.ni.elf, .{
-        .size = 1 * entsize.sh, // as above, only the null shdr initially
-        .alignment = addr_align.max(node_block_align),
-        .moved = true,
-        .resized = true,
-    });
-    elf.nodes.appendAssumeCapacity(.shdr);
-
+    // We want to create the segment nodes *before* the ehdr, because the ehdr should go inside of
+    // the rodata segment. Although to my knowledge neither ELF nor any ELF-based OS strictly
+    // requires this, it is highly conventional and therefore sometimes relied upon.
     if (@"type" != .REL) {
-        elf.ni.rodata = try elf.mf.addLastChildNode(gpa, elf.ni.elf, .{
+        elf.ni.rodata = try elf.mf.addOnlyChildNode(gpa, elf.ni.elf, .{
             // Must be at least `addr_align` for `elf.ni.phdr` to be placed inside this node
             .alignment = node_block_align.max(addr_align),
+            // This node will contain the ehdr, which must be at the start of the ELF file, so this
+            // node must itself be fixed.
+            .fixed = true,
             .moved = true,
             .bubbles_moved = false,
         });
@@ -3781,6 +3726,79 @@ fn initHeaders(
 
         elf.phdrs.items[phndx.gnu_stack] = .none;
     }
+
+    switch (class) {
+        .NONE, _ => unreachable,
+        inline else => |ct_class| {
+            const ElfN = ct_class.ElfN();
+            // In loadable modules, the ehdr goes in the rodata segment, as described above.
+            const parent_ni = switch (@"type") {
+                .REL => elf.ni.elf,
+                .DYN, .EXEC => elf.ni.rodata,
+            };
+            elf.ni.ehdr = try elf.mf.addFirstChildNode(gpa, parent_ni, .{
+                .size = @sizeOf(ElfN.Ehdr),
+                .alignment = addr_align,
+                .fixed = true,
+            });
+            elf.nodes.appendAssumeCapacity(.ehdr);
+
+            const ehdr: *ElfN.Ehdr = @ptrCast(@alignCast(elf.ni.ehdr.slice(&elf.mf)));
+            ehdr.ident = .{
+                .class = class,
+                .data = data,
+                .version = 1,
+                .osabi = osabi,
+                .abiversion = 0,
+            };
+            ehdr.type = @"type".toElf();
+            ehdr.machine = machine.toElf();
+            ehdr.version = 1;
+            ehdr.entry = 0;
+            ehdr.phoff = 0;
+            ehdr.shoff = 0;
+            ehdr.flags = switch (machine) {
+                .LOONGARCH => .{ .loongarch = .{
+                    .base_abi_modifier = mod: {
+                        const cpu = comp.getTarget().cpu;
+                        if (cpu.has(.loongarch, .d)) break :mod .d;
+                        if (cpu.has(.loongarch, .f)) break :mod .f;
+                        break :mod .s;
+                    },
+                    .abi_extension = .base,
+                    .abi_version = 1,
+                } },
+                .SPARCV9 => .{ .sparc = .{
+                    .mm = .rmo,
+                    .ext = .{
+                        .@"32plus" = false,
+                        .sun_us1 = false,
+                        .hal_r1 = false,
+                        .sun_us3 = false,
+                        .le_data = false,
+                    },
+                } },
+                .X86_64 => .{ .int = 0 },
+                .AARCH64, .PPC64, .RISCV => @panic(@tagName(machine)),
+            };
+            ehdr.ehsize = @sizeOf(ElfN.Ehdr);
+            ehdr.phentsize = @sizeOf(ElfN.Phdr);
+            ehdr.phnum = @min(phnum, std.elf.PN_XNUM);
+            ehdr.shentsize = @sizeOf(ElfN.Shdr);
+            ehdr.shnum = 1; // Only the null shdr initially---will be incremented by `addSection`
+            ehdr.shstrndx = std.elf.SHN_UNDEF;
+            if (elf.targetEndian() != native_endian) std.mem.byteSwapAllFields(ElfN.Ehdr, ehdr);
+        },
+    }
+
+    elf.ni.shdr = try elf.mf.addLastChildNode(gpa, elf.ni.elf, .{
+        .size = 1 * entsize.sh, // as above, only the null shdr initially
+        .alignment = addr_align.max(node_block_align),
+        .moved = true,
+        .resized = true,
+    });
+    elf.nodes.appendAssumeCapacity(.shdr);
+
     switch (class) {
         .NONE, _ => unreachable,
         inline else => |ct_class| {
@@ -3818,7 +3836,9 @@ fn initHeaders(
                 // actually `PT_NULL` for now, because we initialize `filesz` and `memsz` to zero.
                 // Any which end up non-empty will have their size populated (and their type set to
                 // `PT_LOAD`) by the segment virtual address space allocation logic.
-                const phdr: []ElfN.Phdr = @ptrCast(@alignCast(elf.ni.phdr.slice(&elf.mf)));
+                const phdr: []ElfN.Phdr = @ptrCast(@alignCast(
+                    elf.ni.phdr.slice(&elf.mf)[0 .. phnum * @sizeOf(ElfN.Phdr)],
+                ));
 
                 const ph_phdr = &phdr[phndx.phdr];
                 ph_phdr.* = .{
@@ -4900,14 +4920,11 @@ const PhdrSlice = union(std.elf.CLASS) {
 };
 fn phdrSlice(elf: *Elf) PhdrSlice {
     assert(elf.ehdrType() != .REL);
-    const slice = elf.ni.phdr.slice(&elf.mf);
     return switch (elf.identClass()) {
         .NONE, _ => unreachable,
-        inline else => |class| @unionInit(
-            PhdrSlice,
-            @tagName(class),
-            @ptrCast(@alignCast(slice)),
-        ),
+        inline else => |class| @unionInit(PhdrSlice, @tagName(class), @ptrCast(@alignCast(
+            elf.ni.phdr.slice(&elf.mf)[0 .. elf.phdrs.items.len * @sizeOf(class.ElfN().Phdr)],
+        ))),
     };
 }
 
