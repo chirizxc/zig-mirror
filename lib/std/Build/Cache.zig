@@ -951,6 +951,7 @@ pub const Manifest = struct {
     /// will need to be recompiled if the imported file is changed.
     pub fn addFilePostFetch(self: *Manifest, file_path: []const u8, max_file_size: usize) ![]const u8 {
         assert(self.manifest_file != null);
+        assert(!std.fs.path.isAbsolute(file_path));
 
         const gpa = self.cache.gpa;
         const prefixed_path = try self.cache.findPrefix(file_path);
@@ -1008,6 +1009,7 @@ pub const Manifest = struct {
     /// whether or not `prefixed_path.sub_path` should be kept.
     pub fn addPrefixedPathPost(man: *Manifest, prefixed_path: PrefixedPath) !bool {
         assert(man.manifest_file != null);
+        assert(!std.fs.path.isAbsolute(prefixed_path.sub_path));
         const gpa = man.cache.gpa;
 
         const gop = try man.files.getOrPutAdapted(gpa, prefixed_path, FilesAdapter{});
@@ -1039,6 +1041,7 @@ pub const Manifest = struct {
         stat: File.Stat,
     ) !void {
         assert(self.manifest_file != null);
+        assert(!std.fs.path.isAbsolute(file_path));
         const gpa = self.cache.gpa;
 
         const prefixed_path = try self.cache.findPrefix(file_path);
