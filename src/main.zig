@@ -568,13 +568,12 @@ const usage_build_generic =
     \\
     \\Global Compile Options:
     \\  --name [name]             Compilation unit name (not a file path)
-    \\  --libc [file]             Provide a file which specifies libc paths
-    \\  -x language               Treat subsequent input files as having type <language>
-    \\  --dep [[import=]name]     Add an entry to the next module's import table
     \\  -M[name][=src]            Create a module based on the current per-module settings.
     \\                            The first module is the main module.
     \\                            "std" can be configured by omitting src
     \\                            After a -M argument, per-module settings are reset.
+    \\  --libc [file]             Provide a file which specifies libc paths
+    \\  -x [language]             Treat subsequent input files as having type <language>
     \\  --error-limit [num]       Set the maximum amount of distinct error values
     \\  -fllvm                    Force using LLVM as the codegen backend
     \\  -fno-llvm                 Prevent using LLVM as the codegen backend
@@ -599,6 +598,7 @@ const usage_build_generic =
     \\  --time-report             Send timing diagnostics to '--listen' clients
     \\
     \\Per-Module Compile Options:
+    \\  --dep [[import=]name]     Add an entry to the next module's import table
     \\  -target [name]            <arch><sub>-<os>-<abi> see the targets command
     \\  -O [mode]                 Choose what to optimize for
     \\    debug (default)         Prioritize bug detection, accurate debug info, compilation speed
