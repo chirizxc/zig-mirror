@@ -323,6 +323,8 @@ pub const Node = extern struct {
             if (size == 0) node.flags.has_content = false;
             switch (node.location()) {
                 .small => |small| {
+                    assert(node.flags.alignment.check(@intCast(offset)));
+                    assert(node.flags.alignment.check(@intCast(size)));
                     if (small.offset != offset) ni.movedAssumeCapacity(mf);
                     if (small.size != size) ni.resizedAssumeCapacity(mf);
                     if (std.math.cast(u32, offset)) |small_offset| {
@@ -881,7 +883,8 @@ fn resizeNode(
         const last_end = last_offset + last_size;
         assert(last_end <= old_parent_size);
         _, const file_size = Node.Index.root.location(mf).resolve(mf);
-        while (true) switch (linux.errno(switch (std.math.order(range_file_offset, file_size)) {
+        // MLUGG TODO: fast path disabled to work around bug
+        while (false) switch (linux.errno(switch (std.math.order(range_file_offset, file_size)) {
             .lt => linux.fallocate(
                 mf.memory_map.file.handle,
                 linux.FALLOC.FL_INSERT_RANGE,
