@@ -243,7 +243,10 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
     var man = cache.obtain();
     defer man.deinit();
 
-    _ = try man.addFile(def_file_path, null);
+    _ = try man.addFilePath(.{
+        .root_dir = comp.dirs.zig_lib,
+        .sub_path = def_file_path,
+    }, null);
 
     const final_lib_basename = try std.fmt.allocPrint(gpa, "{s}.lib", .{lib_name});
     errdefer gpa.free(final_lib_basename);
@@ -384,7 +387,7 @@ pub fn libExists(
 /// This function body is verbose but all it does is test 3 different paths and
 /// see if a .def file exists.
 fn findDef(
-    allocator: Allocator,
+    gpa: Allocator,
     io: Io,
     target: *const std.Target,
     zig_lib_directory: Cache.Directory,
@@ -398,21 +401,17 @@ fn findDef(
         else => unreachable,
     };
 
-    var override_path = std.array_list.Managed(u8).init(allocator);
-    defer override_path.deinit();
+    var override_path: std.ArrayList(u8) = .empty;
+    defer override_path.deinit(gpa);
 
     const s = path.sep_str;
 
     {
         // Try the archtecture-specific path first.
-        const fmt_path = "libc" ++ s ++ "mingw" ++ s ++ "{s}" ++ s ++ "{s}.def";
-        if (zig_lib_directory.path) |p| {
-            try override_path.print("{s}" ++ s ++ fmt_path, .{ p, lib_path, lib_name });
-        } else {
-            try override_path.print(fmt_path, .{ lib_path, lib_name });
-        }
-        if (Io.Dir.cwd().access(io, override_path.items, .{})) |_| {
-            return override_path.toOwnedSlice();
+        override_path.shrinkRetainingCapacity(0);
+        try override_path.print(gpa, "libc" ++ s ++ "mingw" ++ s ++ "{s}" ++ s ++ "{s}.def", .{ lib_path, lib_name });
+        if (zig_lib_directory.handle.access(io, override_path.items, .{})) |_| {
+            return override_path.toOwnedSlice(gpa);
         } else |err| switch (err) {
             error.FileNotFound => {},
             else => |e| return e,
@@ -422,14 +421,9 @@ fn findDef(
     {
         // Try the generic version.
         override_path.shrinkRetainingCapacity(0);
-        const fmt_path = "libc" ++ s ++ "mingw" ++ s ++ "lib-common" ++ s ++ "{s}.def";
-        if (zig_lib_directory.path) |p| {
-            try override_path.print("{s}" ++ s ++ fmt_path, .{ p, lib_name });
-        } else {
-            try override_path.print(fmt_path, .{lib_name});
-        }
-        if (Io.Dir.cwd().access(io, override_path.items, .{})) |_| {
-            return override_path.toOwnedSlice();
+        try override_path.print(gpa, "libc" ++ s ++ "mingw" ++ s ++ "lib-common" ++ s ++ "{s}.def", .{lib_name});
+        if (zig_lib_directory.handle.access(io, override_path.items, .{})) |_| {
+            return override_path.toOwnedSlice(gpa);
         } else |err| switch (err) {
             error.FileNotFound => {},
             else => |e| return e,
@@ -439,14 +433,9 @@ fn findDef(
     {
         // Try the generic version and preprocess it.
         override_path.shrinkRetainingCapacity(0);
-        const fmt_path = "libc" ++ s ++ "mingw" ++ s ++ "lib-common" ++ s ++ "{s}.def.in";
-        if (zig_lib_directory.path) |p| {
-            try override_path.print("{s}" ++ s ++ fmt_path, .{ p, lib_name });
-        } else {
-            try override_path.print(fmt_path, .{lib_name});
-        }
-        if (Io.Dir.cwd().access(io, override_path.items, .{})) |_| {
-            return override_path.toOwnedSlice();
+        try override_path.print(gpa, "libc" ++ s ++ "mingw" ++ s ++ "lib-common" ++ s ++ "{s}.def.in", .{lib_name});
+        if (zig_lib_directory.handle.access(io, override_path.items, .{})) |_| {
+            return override_path.toOwnedSlice(gpa);
         } else |err| switch (err) {
             error.FileNotFound => {},
             else => |e| return e,

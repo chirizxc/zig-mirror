@@ -1278,7 +1278,7 @@ pub const cache_helpers = struct {
     }
 
     pub fn hashCSource(self: *Cache.Manifest, c_source: CSourceFile) !void {
-        _ = try self.addFile(c_source.src_path, null);
+        _ = try self.addFilePath(.initCwd(c_source.src_path), null);
         // Hash the extra flags, with special care to call addFile for file parameters.
         // TODO this logic can likely be improved by utilizing clang_options_data.zig.
         const file_args = [_][]const u8{"-include"};
@@ -1289,7 +1289,7 @@ pub const cache_helpers = struct {
             for (file_args) |file_arg| {
                 if (mem.eql(u8, file_arg, arg) and arg_i + 1 < c_source.extra_flags.len) {
                     arg_i += 1;
-                    _ = try self.addFile(c_source.extra_flags[arg_i], null);
+                    _ = try self.addFilePath(.initCwd(c_source.extra_flags[arg_i]), null);
                 }
             }
         }
@@ -1466,8 +1466,8 @@ pub const CreateOptions = struct {
     stack_report: bool = false,
     link_eh_frame_hdr: bool = false,
     link_emit_relocs: bool = false,
-    linker_script: ?[]const u8 = null,
-    version_script: ?[]const u8 = null,
+    linker_script: ?Cache.Path = null,
+    version_script: ?Cache.Path = null,
     linker_allow_undefined_version: bool = false,
     linker_enable_new_dtags: ?bool = null,
     soname: ?[]const u8 = null,
@@ -1543,7 +1543,7 @@ pub const CreateOptions = struct {
     /// (Darwin) Install name of the dylib
     install_name: ?[]const u8 = null,
     /// (Darwin) Path to entitlements file
-    entitlements: ?[]const u8 = null,
+    entitlements: ?Cache.Path = null,
     /// (Darwin) size of the __PAGEZERO segment
     pagezero_size: ?u64 = null,
     /// (Darwin) set minimum space for future expansion of the load commands
@@ -2735,7 +2735,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
 
     // If using the whole caching strategy, we check for *everything* up front, including
     // C source files.
-    log.debug("Compilation.update for {s}, CacheMode.{s}", .{ comp.root_name, @tagName(comp.cache_use) });
+    log.debug("Compilation.update for {s}, CacheMode.{t}", .{ comp.root_name, comp.cache_use });
     switch (comp.cache_use) {
         .none => |none| {
             assert(none.tmp_artifact_directory == null);
@@ -2744,7 +2744,9 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 const tmp_dir_sub_path = "tmp" ++ fs.path.sep_str ++ std.fmt.hex(tmp_dir_rand_int);
                 const path = try comp.dirs.local_cache.join(arena, &.{tmp_dir_sub_path});
                 const handle = comp.dirs.local_cache.handle.createDirPathOpen(io, tmp_dir_sub_path, .{}) catch |err| {
-                    return comp.setMiscFailure(.open_output, "failed to create output directory '{s}': {t}", .{ path, err });
+                    return comp.setMiscFailure(.open_output, "failed to create output directory {q}: {t}", .{
+                        path, err,
+                    });
                 };
                 break :d .{ .path = path, .handle = handle };
             };
@@ -3330,7 +3332,7 @@ fn addNonIncrementalStuffToCacheManifest(
     try link.hashInputs(man, comp.link_inputs);
 
     for (comp.c_objects.items) |c_object| {
-        _ = try man.addFile(c_object.src.src_path, null);
+        _ = try man.addFilePath(.initCwd(c_object.src.src_path), null);
         man.hash.addOptional(c_object.src.ext);
         man.hash.addListOfBytes(c_object.src.extra_flags);
     }
@@ -3338,11 +3340,11 @@ fn addNonIncrementalStuffToCacheManifest(
     for (comp.win32_resources.items) |win32_resource| {
         switch (win32_resource.src) {
             .rc => |rc_src| {
-                _ = try man.addFile(rc_src.src_path, null);
+                _ = try man.addFilePath(.initCwd(rc_src.src_path), null);
                 man.hash.addListOfBytes(rc_src.extra_flags);
             },
             .manifest => |manifest_path| {
-                _ = try man.addFile(manifest_path, null);
+                _ = try man.addFilePath(.initCwd(manifest_path), null);
             },
         }
     }
@@ -3374,8 +3376,8 @@ fn addNonIncrementalStuffToCacheManifest(
 
     const opts = comp.cache_use.whole.lf_open_opts;
 
-    try man.addOptionalFile(opts.linker_script);
-    try man.addOptionalFile(opts.version_script);
+    try man.addOptionalFilePath(opts.linker_script);
+    try man.addOptionalFilePath(opts.version_script);
     man.hash.add(opts.allow_undefined_version);
     man.hash.addOptional(opts.enable_new_dtags);
 
@@ -3433,7 +3435,7 @@ fn addNonIncrementalStuffToCacheManifest(
 
     // Mach-O specific stuff
     try link.File.MachO.hashAddFrameworks(man, opts.frameworks);
-    try man.addOptionalFile(opts.entitlements);
+    try man.addOptionalFilePath(opts.entitlements);
     man.hash.addOptional(opts.pagezero_size);
     man.hash.addOptional(opts.headerpad_size);
     man.hash.add(opts.headerpad_max_install_names);
@@ -5811,7 +5813,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
     // the XML data as a RT_MANIFEST resource. This means we can skip preprocessing,
     // include paths, CLI options, etc.
     if (win32_resource.src == .manifest) {
-        _ = try man.addFile(src_path, null);
+        _ = try man.addFilePath(.initCwd(src_path), null);
 
         const rc_basename = try std.fmt.allocPrint(arena, "{s}.rc", .{src_basename});
         const res_basename = try std.fmt.allocPrint(arena, "{s}.res", .{src_basename});
@@ -5904,7 +5906,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
     // We now know that we're compiling an .rc file
     const rc_src = win32_resource.src.rc;
 
-    _ = try man.addFile(rc_src.src_path, null);
+    _ = try man.addFilePath(.initCwd(rc_src.src_path), null);
     man.hash.addListOfBytes(rc_src.extra_flags);
 
     const rc_basename_noext = src_basename[0 .. src_basename.len - fs.path.extension(src_basename).len];

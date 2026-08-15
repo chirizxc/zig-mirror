@@ -417,19 +417,8 @@ pub const Manifest = struct {
         return addFileInner(m, prefixed_path, handle, max_file_size);
     }
 
-    /// Deprecated; use `addFilePath`.
-    pub fn addFile(self: *Manifest, file_path: []const u8, max_file_size: ?usize) !usize {
-        assert(self.manifest_file == null);
-
-        const gpa = self.cache.gpa;
-        try self.files.ensureUnusedCapacity(gpa, 1);
-        const prefixed_path = try self.cache.findPrefix(file_path);
-        errdefer gpa.free(prefixed_path.sub_path);
-
-        return addFileInner(self, prefixed_path, null, max_file_size);
-    }
-
     fn addFileInner(self: *Manifest, prefixed_path: PrefixedPath, handle: ?Io.File, max_file_size: ?usize) usize {
+        assert(!std.fs.path.isAbsolute(prefixed_path.sub_path));
         const gop = self.files.getOrPutAssumeCapacityAdapted(prefixed_path, FilesAdapter{});
         if (gop.found_existing) {
             self.cache.gpa.free(prefixed_path.sub_path);
@@ -452,24 +441,10 @@ pub const Manifest = struct {
         return gop.index;
     }
 
-    /// Deprecated, use `addOptionalFilePath`.
-    pub fn addOptionalFile(self: *Manifest, optional_file_path: ?[]const u8) !void {
-        self.hash.add(optional_file_path != null);
-        const file_path = optional_file_path orelse return;
-        _ = try self.addFile(file_path, null);
-    }
-
     pub fn addOptionalFilePath(self: *Manifest, optional_file_path: ?Path) !void {
         self.hash.add(optional_file_path != null);
         const file_path = optional_file_path orelse return;
         _ = try self.addFilePath(file_path, null);
-    }
-
-    pub fn addListOfFiles(self: *Manifest, list_of_files: []const []const u8) !void {
-        self.hash.add(list_of_files.len);
-        for (list_of_files) |file_path| {
-            _ = try self.addFile(file_path, null);
-        }
     }
 
     pub fn addDepFile(self: *Manifest, dir: Io.Dir, dep_file_sub_path: []const u8) !void {
@@ -1127,13 +1102,13 @@ pub const Manifest = struct {
                 // Clang is invoked in single-source mode but other programs may not
                 .target, .target_must_resolve => {},
                 .prereq => |file_path| if (self.manifest_file == null) {
-                    _ = try self.addFile(file_path, null);
+                    _ = try self.addFilePath(.initCwd(file_path), null);
                 } else try self.addFilePost(file_path),
                 .prereq_must_resolve => {
                     resolve_buf.clearRetainingCapacity();
                     try token.resolve(gpa, &resolve_buf);
                     if (self.manifest_file == null) {
-                        _ = try self.addFile(resolve_buf.items, null);
+                        _ = try self.addFilePath(.initCwd(resolve_buf.items), null);
                     } else try self.addFilePost(resolve_buf.items);
                 },
                 else => |err| {
