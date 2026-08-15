@@ -1023,9 +1023,10 @@ fn resizeNode(
                 }
                 try mf.ensureCapacityForSetLocation(gpa);
                 if (parent.last != first_floating_ni) {
-                    first_floating.prev = parent.last;
+                    const old_last = parent.last;
+                    first_floating.prev = old_last;
                     parent.last = first_floating_ni;
-                    try parent.last.setNext(gpa, first_floating_ni, mf);
+                    try old_last.setNext(gpa, first_floating_ni, mf);
                     try last_fixed_ni.setNext(gpa, first_floating.next, mf);
                     switch (first_floating.next) {
                         .none => {},
